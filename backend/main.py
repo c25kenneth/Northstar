@@ -2283,14 +2283,23 @@ Your task:
 2. If PostHog has access to data:
    - Query the relevant metrics (DAUs/MAUs, retention, events, conversions, feature usage)
    - Interpret results in a product-focused way with trends and insights
-   - Post a clear summary to Slack channel {channel} using chat.postMessage
-   - Format: 2-4 sentences, specific numbers with context, no emojis
-   - Example: "DAUs are at 1,234 users, up 12% from last week. Growth is driven by the new onboarding flow."
+   - Post to Slack channel {channel} using chat.postMessage
+
+   Format the Slack message with this structure:
+   *Analytics Report*
+
+   *Metric:* [metric name]
+   *Current:* [value]
+   *Trend:* [up/down X% from previous period]
+
+   *Key insights:*
+   [2-3 bullet points with context and interpretation]
+
+   Use Slack markdown: *bold* for labels, bullet points (•) for lists
 
 3. If PostHog is NOT configured or has no data access:
    - Post a helpful message to Slack channel {channel} using chat.postMessage
-   - Explain that PostHog needs to be connected to a project with API credentials
-   - Keep it brief and professional: "PostHog analytics isn't connected to a project yet. To view metrics, configure the PostHog MCP server with your PostHog API key and project ID."
+   - Format: "PostHog analytics isn't connected to a project yet. To view metrics, configure the PostHog MCP server with your PostHog API key and project ID."
 
 IMPORTANT: Always end by posting to Slack, whether you have data or not."""
                 max_steps = 15
@@ -2318,7 +2327,14 @@ Base branch: {base_branch}
    - base_branch: "{base_branch}"
 5. Post the PR URL to Slack channel {channel} using Slack chat.postMessage
 
-Style: Clean, direct, no emojis, no exclamation marks."""
+Format the Slack message with this structure:
+*Code change executed*
+
+*PR:* [PR URL as clickable link]
+*Files changed:* [number] file(s)
+*Changes:* [one-line summary]
+
+Use Slack markdown: *bold* for labels, clean structure."""
             max_steps = 25
 
         else:  # EXPERIMENT_PROPOSAL or unknown
@@ -2334,9 +2350,30 @@ Repository: {repo_fullname}
 
 1. Use GitHub tools to fetch codebase context
 2. Call propose_experiment tool with the codebase context
-3. Post the proposal to Slack channel {channel} using Slack chat.postMessage
+3. Format the proposal with rich Slack markdown and post to channel {channel}
 
-Style: Clean, professional, no emojis, no exclamation marks."""
+Use this exact format for the Slack message:
+
+*New experiment proposed:*
+[Idea summary - one line description]
+
+*Category:* [category]
+*Confidence:* [confidence as percentage]%
+*Expected impact:* [delta_pct as percentage with sign]% [metric]
+*PR Ready:* [True/False]
+
+*Rationale:*
+[Detailed explanation of the problem and proposed solution]
+
+*Technical Plan:*
+• [file 1]: [action]
+• [file 2]: [action]
+
+Use Slack markdown formatting:
+- *bold* for labels
+- Single line breaks between sections
+- Bullet points (•) for lists
+- Keep it clean and scannable"""
             max_steps = 20
 
         logger.info(f"🚀 Stage 2: Executing with {len(deployments)} deployment(s), max_steps={max_steps}")
