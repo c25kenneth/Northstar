@@ -1,11 +1,12 @@
 """Northstar FastAPI Orchestrator - AI-powered experimentation platform."""
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from metorial import Metorial
 from openai import AsyncOpenAI
 from github import Github
+from github.GithubException import UnknownObjectException
 import os
 import json
 import re
@@ -29,6 +30,35 @@ from slack_webhook import handle_slack_event, handle_slash_command
 
 load_dotenv()
 
+# Helper function to extract user_id from request
+def get_user_id_from_request(
+    request: Request = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+) -> Optional[str]:
+    """
+    Extract user_id from request headers, query params, or body.
+    Priority: header > query param > request body
+    """
+    # Try header first (X-User-ID)
+    if x_user_id:
+        return x_user_id
+    
+    # Try query param
+    if user_id:
+        return user_id
+    
+    # Try to get from request body if available
+    if request and hasattr(request, 'json'):
+        try:
+            body = request.json() if hasattr(request, 'json') else None
+            if body and isinstance(body, dict) and 'user_id' in body:
+                return body['user_id']
+        except:
+            pass
+    
+    return None
+
 app = FastAPI(
     title="Northstar API",
     description="Autonomous AI agent for product experimentation",
@@ -43,6 +73,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize Metorial, OpenAI, and Captain
 metorial = Metorial(api_key=os.getenv("METORIAL_API_KEY"))
@@ -79,7 +114,20 @@ Option 3: The system will generate generic proposals without code analysis."""
     
     try:
         g = Github(github_token)
-        repo = g.get_repo(repo_fullname)
+        try:
+            repo = g.get_repo(repo_fullname)
+        except UnknownObjectException:
+            return f"""Repository: {repo_fullname}
+Error: Repository not found or not accessible. This could mean:
+1. The repository doesn't exist or is private and the token doesn't have access
+2. The repository name is incorrect
+3. The GitHub token doesn't have the necessary permissions
+
+Please provide codebase_context manually in the request, or check that:
+- The repository name is correct (format: owner/repo)
+- GITHUB_TOKEN has access to this repository
+- The repository is not private (or the token has access to private repos)
+"""
         base_branch = active_repo.get("base_branch", "main") if active_repo else "main"
         
         # Get repository info
@@ -116,6 +164,7 @@ Option 3: The system will generate generic proposals without code analysis."""
                 pass
             return tree_items
         
+        file_tree = []
         try:
             file_tree = get_tree_recursive("")
             context_parts.append("\nComplete File Tree:")
@@ -268,21 +317,86 @@ Option 3: The system will generate generic proposals without code analysis."""
             except Exception:
                 pass
         
+        # If we still haven't read files, try reading from the file tree we collected
+        if files_read == 0 and file_tree:
+            context_parts.append("\n=== Attempting to read files from tree ===")
+            for file_path in sorted(file_tree)[:max_files]:
+                if files_read >= max_files or total_chars >= max_total_chars:
+                    break
+                if not is_source_file(file_path):
+                    continue
+                try:
+                    file_content = repo.get_contents(file_path, ref=base_branch)
+                    if file_content.size < 80000:  # 80KB limit per file
+                        content_text = file_content.decoded_content.decode('utf-8')
+                        file_chars = len(content_text)
+                        if total_chars + file_chars <= max_total_chars:
+                            context_parts.append(f"\n--- {file_path} (USER-WRITTEN CODE) ---")
+                            context_parts.append(content_text)
+                            files_read += 1
+                            total_chars += file_chars
+                except Exception as e:
+                    # Log but continue - file might not exist or be inaccessible
+                    continue
+        
         # Get commit info for context
         try:
             commits = repo.get_commits(base_branch, per_page=5)
             context_parts.append("\n=== Recent Commits ===")
             for commit in commits:
-                context_parts.append(f"  - {commit.commit.message.split(chr(10))[0][:120]}")
+                try:
+                    # Handle commit message as string or list
+                    commit_msg = commit.commit.message
+                    if isinstance(commit_msg, list):
+                        commit_msg = '\n'.join(commit_msg)
+                    elif not isinstance(commit_msg, str):
+                        commit_msg = str(commit_msg)
+                    # Get first line of commit message
+                    first_line = commit_msg.split('\n')[0] if '\n' in commit_msg else commit_msg
+                    context_parts.append(f"  - {first_line[:120]}")
+                except Exception:
+                    # Skip this commit if we can't parse it
+                    continue
         except Exception:
             pass
         
         context_parts.append(f"\n=== END OF CODE CONTEXT (Read {files_read} files, {total_chars} characters) ===")
         
+        # Validate that we actually got code content
+        if files_read == 0 or total_chars < 100:
+            # If we have a file tree but no code, the files might not be in expected directories
+            # Try to read files from the tree anyway
+            if context_parts and any("File Tree:" in part for part in context_parts):
+                # Return what we have (file tree) as context - better than nothing
+                # The AI can work with the structure information
+                return "\n".join(context_parts)
+            else:
+                return f"""Repository: {repo_fullname}
+Error: Could not fetch source code from repository. The repository may be:
+1. Empty or only contains configuration files
+2. Private and the token doesn't have read access
+3. Using a different branch structure
+4. Source files are in unexpected directories
+
+Please provide codebase_context manually in the request with your actual source code."""
+        
         return "\n".join(context_parts)
     
+    except UnknownObjectException as e:
+        return f"""Repository: {repo_fullname}
+Error: Repository not found (404). This could mean:
+1. The repository doesn't exist or is private and the token doesn't have access
+2. The repository name is incorrect
+
+Please provide codebase_context manually in the request, or check:
+- Repository name format: owner/repo (e.g., username/repository-name)
+- GITHUB_TOKEN has access to this repository"""
     except Exception as e:
-        return f"Repository: {repo_fullname}\nError fetching repository context: {str(e)}"
+        error_str = str(e).lower()
+        if "404" in error_str or "not found" in error_str:
+            return f"""Repository: {repo_fullname}
+Error: Repository not found or not accessible. Please provide codebase_context manually in the request with your actual source code."""
+        return f"Repository: {repo_fullname}\nError fetching repository context: {str(e)}\nPlease provide codebase_context manually in the request."
 
 
 # Request/Response Models
@@ -371,7 +485,11 @@ async def complete_oauth(session_id: str):
 
 
 @app.post("/northstar/propose")
-async def propose_experiment(req: ProposeExperimentRequest):
+async def propose_experiment(
+    req: ProposeExperimentRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+):
     """
     Generate an experiment proposal using Metorial + Northstar MCP.
 
@@ -381,8 +499,11 @@ async def propose_experiment(req: ProposeExperimentRequest):
     3. Return a structured proposal
     """
     try:
+        # Get user_id from request
+        current_user_id = get_user_id_from_request(request, x_user_id)
+        
         # Get active repository
-        active_repo = db_operations.get_active_repository()
+        active_repo = db_operations.get_active_repository(user_id=current_user_id)
         repo_id = active_repo.get("id") if active_repo else None
         repo_fullname = active_repo.get("repo_fullname") if active_repo else "unknown/unknown"
 
@@ -400,7 +521,10 @@ async def propose_experiment(req: ProposeExperimentRequest):
 
         # Generate proposal - try with MCP tool first, fallback to direct generation
         # First, get repository code context
-        if req.codebase_context:
+        is_user_provided = bool(req.codebase_context and req.codebase_context.strip())
+        
+        if is_user_provided:
+            # User provided code directly - use it as-is
             repo_context = f"""
 Repository: {repo_fullname}
 User-provided codebase context:
@@ -410,7 +534,7 @@ User-provided codebase context:
             repo_context = await fetch_repository_context(repo_fullname, active_repo)
         
         # Validate that we have actual code context
-        if not repo_context or len(repo_context.strip()) < 100:
+        if not repo_context or len(repo_context.strip()) < 50:
             error_msg = f"Insufficient codebase context. Repository context is too short ({len(repo_context) if repo_context else 0} chars)."
             if "GITHUB_TOKEN not set" in repo_context:
                 error_msg += " Please set GITHUB_TOKEN in your backend environment variables to automatically fetch code from GitHub, or provide codebase_context in the request."
@@ -421,46 +545,140 @@ User-provided codebase context:
                 detail=error_msg
             )
         
-        # Check if repo_context looks like an error message instead of actual code
-        if "GITHUB_TOKEN not set" in repo_context or "Note:" in repo_context:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot fetch repository code. {repo_context}. Please set GITHUB_TOKEN in your backend environment variables, or provide codebase_context in the request with the actual repository code."
+        # If user provided code directly, accept it if it looks like code
+        if is_user_provided:
+            # Check if user-provided code looks like actual code (has common code patterns)
+            code_indicators = [
+                "class ", "function ", "def ", "const ", "let ", "var ",
+                "import ", "from ", "package:", "extends ", "implements ",
+                "Widget ", "Component", "return ", "@override", "@override",
+                "void ", "int ", "String ", "List<", "Map<", "<>", "=>",
+                "{", "}", "(", ")", "[", "]", "=", ";", ":", "->"
+            ]
+            user_code_lower = req.codebase_context.lower()
+            has_code_patterns = any(indicator.lower() in user_code_lower for indicator in code_indicators)
+            
+            if not has_code_patterns:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The provided codebase context doesn't appear to contain valid code. Please paste actual source code (classes, functions, imports, etc.)."
+                )
+            # User provided code and it looks like code - accept it and continue
+        else:
+            # GitHub-fetched code - apply stricter validation
+            # Check if repo_context looks like an error message instead of actual code
+            # Be careful - only check for actual errors, not informational messages
+            error_indicators = [
+                "GITHUB_TOKEN not set",
+                "Error fetching repository",
+                "Repository not found (404)",
+                "Error: Repository not found",
+                "Error: Could not fetch source code",
+                "Repository not found or not accessible"
+            ]
+            # Only flag as error if it starts with "Error:" or has explicit error phrases
+            has_error = (
+                repo_context.strip().startswith("Error:") or
+                "Error: Repository not found" in repo_context or
+                "Error: Could not fetch source code" in repo_context or
+                ("GITHUB_TOKEN not set" in repo_context and "File Tree:" not in repo_context)
             )
+            
+            # Also check if we got actual code content (should have file paths and code blocks)
+            # Be more lenient - accept file tree as context if we don't have full code
+            has_code_content = (
+                "USER-WRITTEN CODE" in repo_context or
+                "--- " in repo_context  # File delimiters indicating actual code was read
+            )
+            
+            # Check if we have source files mentioned in the tree or structure
+            # Be very lenient - if we have a file tree, accept it as valid context
+            has_file_tree = "File Tree:" in repo_context or "Complete File Tree:" in repo_context
+            has_source_files_in_tree = (
+                ".jsx" in repo_context or
+                ".js" in repo_context or
+                ".tsx" in repo_context or
+                ".ts" in repo_context or
+                ".py" in repo_context or
+                ".dart" in repo_context or
+                "src/" in repo_context or
+                "components/" in repo_context
+            )
+            has_source_files_in_structure = (has_file_tree and has_source_files_in_tree) or (
+                # If we have file tree without explicit errors, that's valid context
+                has_file_tree and not repo_context.strip().startswith("Error:")
+            )
+            
+            # If we have error OR (no code content AND no source files mentioned in structure)
+            # BUT: If we have source files in structure, allow it through even without full code
+            if has_error and not has_source_files_in_structure:
+                # Only reject if there's a real error AND no source files to work with
+                error_msg = f"Cannot fetch repository code from GitHub. {repo_context[:500]}"
+                error_msg += "\n\nPlease provide codebase_context manually:"
+                error_msg += "\n1. Go to Settings in the frontend"
+                error_msg += "\n2. Click 'Show Codebase Input' if available"
+                error_msg += "\n3. Paste your source code files (especially UI/styling files)"
+                error_msg += "\n4. Then click 'Trigger Experiment'"
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_msg
+                )
+            elif not has_code_content and not has_source_files_in_structure:
+                # Reject only if we have neither code content nor source files in structure
+                error_msg = f"Cannot fetch repository code from GitHub. {repo_context[:500]}"
+                error_msg += "\n\nPlease provide codebase_context manually:"
+                error_msg += "\n1. Go to Settings in the frontend"
+                error_msg += "\n2. Click 'Show Codebase Input' if available"
+                error_msg += "\n3. Paste your source code files (especially UI/styling files)"
+                error_msg += "\n4. Then click 'Trigger Experiment'"
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_msg
+                )
+        # If we have either code content OR source files in structure, allow it through (continue)
         
         try:
             if northstar_mcp_deployment_id:
-                # Try to use propose_experiment tool
+                # Try to use propose_experiment tool with a simpler, less directive prompt
+                # Truncate context to avoid content filter issues
+                safe_context = repo_context[:3000] if len(repo_context) > 3000 else repo_context
+                
                 result = await metorial.run(
                     client=openai_client,
-                    message=f"""
-                    CALL THE propose_experiment TOOL IMMEDIATELY. The codebase context is provided below - you don't need to fetch anything, just analyze what's provided.
-                    
-                    STEP 1: Call propose_experiment tool RIGHT NOW with these parameters:
-                    {{
-                      "codebase_context": "{repo_context[:4000]}...",
-                      "repo_fullname": "{repo_fullname}"
-                    }}
-                    
-                    IMPORTANT: The codebase_context parameter ALREADY CONTAINS the actual repository code below. You don't need to fetch anything - the code is provided for you. Just analyze it.
-                    
-                    Full codebase context (first 4000 chars):
-                    {repo_context[:4000]}
-                    
-                    STEP 2: After calling the tool, analyze the codebase_context that was provided and generate a proposal with ACTUAL UI/VISUAL CODE CHANGES based on the actual code you see.
-                    
-                    CRITICAL FOCUS: UI/VISUAL ADJUSTMENTS ONLY - analyze the CSS, Tailwind classes, inline styles, and component styling in the codebase_context provided above.
-                    
-                    STEP 3: Return ONLY valid JSON (no explanations, no code fences, no text before/after):
-                    
-                    {{"proposal_id": "exp-unique", "idea_summary": "Specific UI/visual improvement based on actual styling code analysis (e.g., 'Improve button hover states', 'Fix spacing inconsistencies', 'Enhance visual hierarchy')", "rationale": "Detailed explanation of the UI/visual problem found in the styling code (what styling issue exists, why it hurts the user experience visually, how the change will improve visual design)", "expected_impact": {{"metric": "click_rate", "delta_pct": 0.05}}, "technical_plan": [{{"file": "actual/path/to/style/file.ext (CSS, JSX, TSX, etc.)", "action": "Specific UI/styling change description"}}], "update_block": "ACTUAL UI/STYLING CODE CHANGES in Fast Apply format with +/- markers showing specific styling modifications (CSS properties, Tailwind classes, inline styles, component props) - NO placeholders, NO instructions, JUST ACTUAL STYLING CODE", "category": "ui_optimization", "confidence": 0.8}}
-                    
-                    NOTE: The proposal_id field will be ignored - a unique ID will be generated automatically. Just use "exp-unique" as a placeholder.
-                    
-                    IMPORTANT: Return ONLY the JSON object, nothing else. No explanations, no code fences, no markdown. Just pure valid JSON that can be parsed directly.
-                    The update_block MUST contain actual UI/styling code changes with +/- markers (CSS changes, Tailwind class modifications, style prop updates), NOT instructions or placeholders.
-                    Focus ONLY on visual/styling improvements that users will see.
-                    """,
+                    message=f"""CRITICAL: You MUST analyze and use ONLY the actual code provided below. Do NOT generate generic or pseudo code.
+
+Repository: {repo_fullname}
+
+ACTUAL CODEBASE CONTEXT - USE ONLY THIS CODE:
+{safe_context}
+
+REQUIREMENTS:
+1. You MUST reference specific files, components, classes, and code patterns that exist in the code above
+2. Your update_block MUST contain actual code from the context above with +/- modifications
+3. Do NOT create generic examples or pseudo code - only use real code from the context
+4. In your technical_plan, reference actual file paths that appear in the code above
+5. In your update_block, show actual code snippets from the context with your proposed changes
+
+Task: Find ONE specific UI/styling issue in the actual code above and propose a concrete fix using real code from the context.
+
+CRITICAL: Your modified code MUST match the exact syntax, framework, and code style of the original code:
+- If the original code uses React JSX, use React JSX syntax (not Vue, not Flutter)
+- If the original code uses Tailwind CSS classes, use Tailwind CSS (not plain CSS, not styled-components)
+- If the original code uses functional components with hooks, use functional components (not class components)
+- If the original code uses TypeScript, use TypeScript syntax (not JavaScript)
+- Match the exact indentation style, quote style (single vs double), and formatting conventions
+- Use the same component structure, import style, and naming conventions as the original code
+- Preserve all existing code patterns and conventions - only modify what's necessary for the UI improvement
+
+After analyzing the actual code, use the propose_experiment tool or return a JSON object with:
+- idea_summary: Specific improvement based on actual code (reference specific components/files)
+- rationale: Explain which actual code has the issue and why
+- expected_impact: {{"metric": "user_satisfaction", "delta_pct": 0.05}}
+- technical_plan: [{{"file": "ACTUAL_FILE_PATH_FROM_CONTEXT_ABOVE", "action": "Specific change to actual code"}}]
+- update_block: ACTUAL code from context with +/- changes (not generic examples) - MUST match the exact framework/syntax/language of the original code
+- category: "ui_optimization"
+- confidence: 0.8
+""",
                     model="gpt-4o",
                     server_deployments=deployments,
                     max_steps=10
@@ -472,16 +690,37 @@ User-provided codebase context:
             result = await metorial.run(
                 client=openai_client,
                 message=f"""
-                YOU ARE A UI/VISUAL DESIGN-FOCUSED CODE ANALYST. Your PRIMARY focus is identifying VISUAL DESIGN AND USER INTERFACE PROBLEMS in the actual code and proposing MEASURABLE UI/VISUAL IMPROVEMENTS. FOCUS EXCLUSIVELY ON UI/VISUAL ADJUSTMENTS (what users SEE).
-                
-                REPOSITORY CONTEXT (ACTUAL CODE FROM {repo_fullname}):
-                {repo_context}
-                
-                CRITICAL INSTRUCTIONS:
-                1. IGNORE configuration files (package.json, pubspec.yaml, tsconfig.json, etc.) - these are NOT user-written code
-                2. FOCUS ONLY on UI/STYLING code files (CSS, Tailwind classes, component styling, HTML structure, React/Flutter UI components)
-                3. IGNORE: Functional logic, backend code, business logic, data processing, API calls, error handling logic (unless it affects UI display)
-                4. ANALYZE ACTUAL STYLING/UI CODE and identify VISUAL/UI PROBLEMS:
+CRITICAL: You MUST analyze and use ONLY the actual code provided below. Do NOT create generic examples or pseudo code.
+
+Repository: {repo_fullname}
+
+ACTUAL CODEBASE CONTEXT - YOU MUST USE ONLY THIS REAL CODE:
+{repo_context[:8000] if len(repo_context) > 8000 else repo_context}
+
+MANDATORY REQUIREMENTS:
+1. You MUST reference specific files, components, classes, functions, and code patterns that appear in the code above
+2. Your update_block MUST contain actual code from the context above - show real code with your proposed +/- modifications
+3. Do NOT generate generic examples, pseudo code, or placeholder code - ONLY use real code from the context provided
+4. In technical_plan, use actual file paths that appear in the code above (not made-up paths)
+5. Reference actual component names, class names, function names from the code above
+6. In update_block, show the actual code snippet from the context with your changes - include real context lines
+7. CRITICAL SYNTAX MATCH: Your modified code MUST match the exact syntax, framework, and code style of the original code:
+   - If the original code uses React JSX, use React JSX syntax (not Vue, not Flutter)
+   - If the original code uses Tailwind CSS classes, use Tailwind CSS (not plain CSS, not styled-components)
+   - If the original code uses functional components with hooks, use functional components (not class components)
+   - If the original code uses TypeScript, use TypeScript syntax (not JavaScript)
+   - Match the exact indentation style, quote style (single vs double), and formatting conventions
+   - Use the same component structure, import style, and naming conventions as the original code
+   - Preserve all existing code patterns and conventions - only modify what's necessary for the UI improvement
+
+Instructions:
+1. Carefully read the actual codebase context above
+2. Identify ONE specific UI/styling issue in the real code (reference specific file/component)
+3. Propose a fix using ONLY the actual code from the context (not generic examples)
+4. Focus on UI/styling code files (CSS, Tailwind classes, component styling, HTML structure, React/Flutter UI components)
+5. Ignore configuration files and backend/functional logic
+
+Identify one specific visual/UI improvement in the ACTUAL CODE above:
                    
                    UI PROBLEMS (User Interface / Visual Design) - FOCUS EXCLUSIVELY ON THESE:
                    - Poor visual hierarchy (important elements not emphasized, need better sizing/spacing)
@@ -510,24 +749,22 @@ User-provided codebase context:
                 - Look for visual inconsistencies and styling patterns across the codebase
                 - Understand the current visual design system (if any) and identify gaps
                 
-                Step 2: IDENTIFY SPECIFIC UI/VISUAL PROBLEMS IN THE CODE
-                - Analyze UI/STYLING code: CSS files, Tailwind classes, inline styles, component styling props
-                - Find styling inconsistencies: same elements styled differently across the app
-                - Identify poor visual design: cluttered layouts, poor spacing, bad typography, inconsistent colors
-                - Look for missing visual polish: no hover states, no transitions, no shadows, no borders
-                - Check for visual hierarchy issues: important elements not emphasized, poor sizing/spacing
-                - Find typography problems: hard to read, wrong sizes, bad font choices, poor contrast
-                - Identify color scheme issues: colors don't work together, poor contrast, inconsistent palette
-                - Look for button/form styling problems: no hover states, bad colors, wrong sizes, unclear styling
-                - Check responsive design: layouts that don't work on mobile/tablet, missing breakpoints
-                - Find layout issues: elements overlapping, misaligned, need better grid/flexbox
-                - Identify missing visual feedback: no loading indicators, no hover effects, no active states
-                - Check card/container styling: no shadows, no borders, no visual separation
+                Step 2: IDENTIFY SPECIFIC UI/VISUAL PROBLEMS IN THE ACTUAL CODE PROVIDED ABOVE
+                - Look at the ACTUAL code in the codebase context above
+                - Find specific files/components with styling issues (reference actual file paths and component names)
+                - Identify actual CSS classes, Tailwind classes, or style props that need improvement
+                - Reference actual component names, function names, and code patterns from the context
+                - Find styling inconsistencies in the actual code (same elements styled differently)
+                - Identify poor visual design in the actual code (cluttered layouts, poor spacing, bad typography)
+                - Look for missing visual polish in the actual code (no hover states, no transitions, no shadows)
+                - Check actual code for visual hierarchy issues, typography problems, color scheme issues
+                - Identify actual button/form/card styling problems in the real code
                 
-                Step 3: PROPOSE MEASURABLE UI/VISUAL IMPROVEMENTS (UI/VISUAL ADJUSTMENTS ONLY)
-                - Choose ONE specific, high-impact UI/VISUAL improvement based on actual styling/UI code you analyzed
-                - FOCUS EXCLUSIVELY ON VISUAL/UI improvements (styling changes, layout adjustments, visual design)
-                - Make sure your change is CORRECT and will actually work (use proper syntax, match existing patterns)
+                Step 3: PROPOSE MEASURABLE UI/VISUAL IMPROVEMENTS BASED ON THE ACTUAL CODE ABOVE
+                - Choose ONE specific UI/VISUAL improvement from the ACTUAL code you analyzed above
+                - Reference the SPECIFIC file path and component name from the codebase context
+                - Use ONLY actual code from the context - show real code snippets with your proposed changes
+                - Make sure your change matches the existing code patterns and syntax from the context
                 - Focus on improvements that users will VISUALLY NOTICE immediately
                 - REQUIRED: UI/VISUAL improvements (what users see) - styling, layout, colors, typography, visual hierarchy:
                   * Improve visual hierarchy with better sizing, spacing, or colors
@@ -549,18 +786,15 @@ User-provided codebase context:
                   * Add empty states
                   * Improve form validation feedback
                 
-                Step 4: WRITE CORRECT, WORKING UI/STYLING CODE
-                - Your UI/styling changes MUST be syntactically correct and match the existing code style
-                - Use actual CSS classes, Tailwind classes, style props, component names from the code you analyzed
-                - For CSS: Match existing patterns, use correct selectors, proper property syntax
-                - For Tailwind: Use correct class names, match existing Tailwind patterns
-                - For React/component styling: Use correct style props, className props, or styled-component patterns
-                - For Flutter/Dart: Pay EXTREME attention to UI/styling code structure:
-                  * Widget style properties go INSIDE widget constructors (e.g., ElevatedButton(style: styleFrom(...)))
-                  * Button style properties go in ElevatedButton.styleFrom() (e.g., backgroundColor, foregroundColor, overlayColor)
-                  * Style properties NEVER go in setState() blocks - only state variables
-                  * Preserve the exact structure of the original UI code - only modify styling properties
-                - Test your styling mentally - will this actually work and improve the visual appearance?
+                Step 4: WRITE YOUR UPDATE_BLOCK USING ONLY ACTUAL CODE FROM THE CONTEXT ABOVE
+                - CRITICAL: Your update_block MUST contain actual code from the codebase context provided above
+                - Extract the real code snippet from the context (include actual file content)
+                - Show the actual code with +/- markers indicating your proposed changes
+                - Use actual CSS classes, Tailwind classes, component names, function names from the context
+                - Match the existing code style, patterns, and syntax exactly as they appear in the context
+                - Include 5-10 lines of actual context code before and after your changes (from the real code above)
+                - Do NOT create generic examples or pseudo code - only modify actual code from the context
+                - Reference actual file paths that exist in the codebase context above
                 
                 EXAMPLE OF CORRECT Flutter update_block:
                 If you want to add overlayColor to a button, it goes in the styleFrom() call:
@@ -581,58 +815,40 @@ User-provided codebase context:
                 +     onPrimary: Colors.white,  // THIS IS WRONG - onPrimary doesn't go in setState!
                   }});
                 
-                Return a JSON object with this structure:
-                {{
-                    "proposal_id": "exp-unique",
-                    "idea_summary": "Specific UX/UI improvement based on actual code - e.g., 'Add loading state to prevent blank screen during auth' or 'Improve visual hierarchy with better spacing' or 'Add hover states for better interactivity'",
-                    "rationale": "DETAILED explanation of the UX/UI problem you found in the code: What user flow or visual design was affected? What specific code has the issue? Why does it hurt UX/UI? How will your change improve the user experience or visual design? Reference specific files, functions, components, and code patterns you saw.",
-                    "expected_impact": {{"metric": "user_satisfaction", "delta_pct": 0.10}},
-                    "technical_plan": [
-                        {{"file": "actual/path/to/file.ext", "action": "Specific UX/UI improvement - e.g., 'Add loading indicator during async operation' or 'Improve button styling with hover states' or 'Fix layout spacing for better visual hierarchy'"}}
-                    ],
-                    "update_block": "FINAL CODE WITH INLINE CHANGES - SIMPLE UNIFIED DIFF FORMAT:\\n\\nYou MUST show the FINAL, COMPLETE code block with inline +/- markers. NO git diff headers (no 'diff --git', 'index', '---', '+++' lines). Just show code with +/- markers. Include 5-10 lines of context before and after. For Flutter, ensure changes are in correct locations (e.g., button properties in styleFrom, not in setState).",
-                    "category": "user_experience",
-                    "confidence": 0.80
-                }}
-                
-                CRITICAL REQUIREMENTS FOR update_block (NO EXCEPTIONS):
-                - ABSOLUTELY NO PLACEHOLDER TEXT like "[Show code...]", "[Your changes here]", "... existing code ..."
-                - NO git diff headers (NO "diff --git", "index", "---", "+++" lines - these will cause parsing errors)
-                - MUST use SIMPLE unified diff format with +/- markers only - NO git diff headers
-                - Show ONLY the code with +/- markers indicating changes
-                - MUST contain ACTUAL, REAL code from the repository context you analyzed
-                - MUST include 5-10 lines of REAL context before and after the changes
-                - MUST be syntactically correct and match the language/framework patterns (React, Flutter, Dart, JavaScript, etc.)
-                - MUST use real function names, class names, component names, variable names, CSS class names from the ACTUAL code
-                - For Flutter/Dart: Ensure code changes are in the correct location (e.g., onPrimary goes in ElevatedButton.styleFrom(), NOT in setState())
-                - MUST preserve proper indentation and code structure
-                
-                EXAMPLE FORMAT FOR update_block (Flutter):
-                // DO NOT include git diff headers!
-                // Just show code with +/- markers:
-                
-                  const SizedBox(height: 32),
-                + RichText(
-                +   textAlign: TextAlign.center,
-                +   ...
-                + ),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      elevation: 0,
-                      foregroundColor: Colors.white,
-                +     overlayColor: MaterialStateProperty.all(Colors.black12),
-                      backgroundColor: Color.fromRGBO(255, 191, 99, 1),
-                    ),
-                  ),
-                
-                WRONG FORMAT (DO NOT USE):
-                - diff --git a/lib/file.dart b/lib/file.dart
-                - index ...
-                - --- a/lib/file.dart
-                - +++ b/lib/file.dart
-                - @@ -53,11 +53,13 @@
-                
-                Return ONLY valid JSON, no markdown or extra text.
+Return a JSON object with this exact structure:
+{{
+  "proposal_id": "exp-unique",
+  "idea_summary": "Specific UI improvement based on actual code above (e.g., 'Improve hover state for Button component in src/components/Button.jsx')",
+  "rationale": "Explain which specific file/component from the codebase context has the issue and how your change will improve it",
+  "expected_impact": {{"metric": "user_satisfaction", "delta_pct": 0.05}},
+  "technical_plan": [{{"file": "ACTUAL_FILE_PATH_FROM_CONTEXT_ABOVE", "action": "Specific change to actual code"}}],
+  "update_block": "ACTUAL code from the context above with +/- changes. Show real code with 5-10 lines of actual context before/after. Use actual component names, class names, functions from the context.",
+  "category": "ui_optimization",
+  "confidence": 0.8
+}}
+
+CRITICAL REQUIREMENTS FOR update_block:
+- Extract the ACTUAL code snippet from the codebase context above (copy real code from the context)
+- Show the REAL code with +/- markers indicating your proposed changes
+- Include 5-10 lines of ACTUAL context code before and after your changes (from the codebase context above)
+- Use actual file paths, component names, class names, function names that appear in the context
+- CRITICAL: Match the exact syntax and framework of the original code:
+  * If original is React JSX, your changes must be React JSX (same syntax, same patterns)
+  * If original uses Tailwind CSS classes, your changes must use Tailwind CSS (same class format)
+  * If original uses functional components, keep functional components (don't change to class components)
+  * Match indentation style, quote style (single vs double), and all formatting conventions
+  * Preserve import statements, component structure, and all existing code patterns
+  * Only modify what's necessary for the UI improvement - keep everything else identical
+- Example format (using ACTUAL code from context):
+  
+  If the context shows a React file like "src/components/Button.jsx", extract the actual React code from that file shown in the context above, then show it with your proposed +/- changes, keeping the same React syntax.
+  
+  Your update_block must show actual code from the context with your modifications, maintaining the exact same framework/syntax/language. Include 5-10 lines of real context code before and after your changes.
+  
+- Do NOT create generic examples or pseudo code - only use code that appears in the context above
+- ONLY modify actual code that appears in the codebase context above
+- The update_block must contain real code snippets from the context, not made-up examples
+- MATCH THE FRAMEWORK: If the original code is React, your output must be React. If it's Flutter, your output must be Flutter. Match the exact syntax and style.
                 """,
                 model="gpt-4o",
                 server_deployments=deployments if slack_deployment_id else [],
@@ -641,6 +857,35 @@ User-provided codebase context:
 
         # Parse the proposal JSON from the result
         proposal_text = result.text
+        
+        # Check if the LLM refused the request - check early before any JSON parsing
+        refusal_indicators = [
+            "I'm sorry",
+            "I can't assist",
+            "I cannot assist",
+            "currently can't assist",
+            "can't help",
+            "cannot help",
+            "I apologize",
+            "I am not able",
+            "unable to assist",
+            "refuse",
+            "decline",
+            "not able to help",
+            "cannot complete",
+            "not appropriate",
+            "I cannot provide"
+        ]
+        proposal_text_lower = proposal_text.lower().strip()
+        is_refusal = any(indicator in proposal_text_lower for indicator in refusal_indicators)
+        
+        # If it looks like a refusal (even if there's JSON), treat it as a refusal
+        # Also check if response is very short or starts with refusal phrases
+        if is_refusal or (len(proposal_text.strip()) < 100 and not proposal_text.strip().startswith('{')):
+            raise HTTPException(
+                status_code=500,
+                detail=f"The AI model refused to generate a proposal. Response: {proposal_text[:500]}. This may be due to content filters or the request format. Please try again or adjust the request."
+            )
         
         # Remove markdown code fences if present
         json_text = re.sub(r'^```(?:json)?\s*\n', '', proposal_text.strip(), flags=re.MULTILINE)
@@ -825,8 +1070,24 @@ User-provided codebase context:
                     try:
                         proposal_json = json.loads(json_str_minimal)
                     except json.JSONDecodeError:
-                        # Log the error with more context
-                        error_detail = f"Failed to parse proposal JSON: {str(e)}. Attempted fixes also failed: {str(e2)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
+                        # Check if the response might be a refusal
+                        refusal_check = proposal_text.lower()
+                        is_likely_refusal = (
+                            "I'm sorry" in refusal_check or 
+                            "I can't assist" in refusal_check or 
+                            "currently can't assist" in refusal_check or
+                            "cannot assist" in refusal_check or
+                            "can't help" in refusal_check or
+                            "cannot help" in refusal_check or
+                            "I apologize" in refusal_check or
+                            "unable to assist" in refusal_check
+                        )
+                        
+                        if is_likely_refusal or (len(proposal_text.strip()) < 100 and not proposal_text.strip().startswith('{')):
+                            error_detail = f"The AI model refused to generate a proposal. Response: {proposal_text[:500]}. This may be due to content filters or the request format. Please try again or adjust the request."
+                        else:
+                            # Log the error with more context
+                            error_detail = f"Failed to parse proposal JSON: {str(e)}. Attempted fixes also failed: {str(e2)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
                         raise HTTPException(
                             status_code=500,
                             detail=error_detail
@@ -834,8 +1095,24 @@ User-provided codebase context:
             except HTTPException:
                 raise
             except Exception as fix_error:
-                # If fixes fail, raise original error
-                error_detail = f"Failed to parse proposal JSON: {str(e)}. Fix attempt failed: {str(fix_error)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
+                # Check if the response might be a refusal
+                refusal_check = proposal_text.lower()
+                is_likely_refusal = (
+                    "I'm sorry" in refusal_check or 
+                    "I can't assist" in refusal_check or 
+                    "currently can't assist" in refusal_check or
+                    "cannot assist" in refusal_check or
+                    "can't help" in refusal_check or
+                    "cannot help" in refusal_check or
+                    "I apologize" in refusal_check or
+                    "unable to assist" in refusal_check
+                )
+                
+                if is_likely_refusal or (len(proposal_text.strip()) < 100 and not proposal_text.strip().startswith('{')):
+                    error_detail = f"The AI model refused to generate a proposal. Response: {proposal_text[:500]}. This may be due to content filters or the request format. Please try again or adjust the request."
+                else:
+                    # If fixes fail, raise original error
+                    error_detail = f"Failed to parse proposal JSON: {str(e)}. Fix attempt failed: {str(fix_error)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
                 raise HTTPException(
                     status_code=500,
                     detail=error_detail
@@ -854,6 +1131,12 @@ User-provided codebase context:
         # Keep AI's proposal_id as a reference, but use our unique one
         ai_proposal_id = proposal_json.get("proposal_id", "exp-001")
         update_block = proposal_json.get("update_block", "")
+        
+        # Ensure update_block is a string (in case JSON has it as a list)
+        if isinstance(update_block, list):
+            update_block = '\n'.join(str(line) for line in update_block)
+        elif not isinstance(update_block, str):
+            update_block = str(update_block)
         
         # Clean up update_block: Remove git diff headers if present
         if update_block:
@@ -882,7 +1165,8 @@ User-provided codebase context:
             confidence=proposal_json.get("confidence", 0.5),
             repo_id=repo_id,
             update_block=update_block,
-            oauth_session_id=req.oauth_session_id
+            oauth_session_id=req.oauth_session_id,
+            user_id=current_user_id
         )
 
         # Use the actual proposal_id that was saved (may have been modified if duplicate)
@@ -1020,15 +1304,28 @@ async def execute_experiment(req: ExecuteExperimentRequest):
                 # Send Slack notification
                 if slack_deployment_id and req.oauth_session_id:
                     try:
-                        slack_message = f"Experiment executed\n"
-                        slack_message += f"ID: {req.proposal_id}\n"
-                        slack_message += f"Description: {req.instruction}\n"
-                        slack_message += f"PR: {pr_url}"
+                        if pr_url:
+                            slack_message = f"✅ Experiment executed successfully!\n"
+                            slack_message += f"ID: {req.proposal_id}\n"
+                            slack_message += f"Description: {req.instruction}\n"
+                            slack_message += f"PR: {pr_url}"
+                            logger.info(f"Constructing Slack message with PR URL: {pr_url}")
+                        else:
+                            slack_message = f"Experiment completed - PR creation failed\n"
+                            slack_message += f"ID: {req.proposal_id}\n"
+                            slack_message += f"Description: {req.instruction}"
+                            logger.warning(f"PR URL is None in direct PR path, constructing Slack message without PR link")
 
-                        await send_slack_message(slack_message, req.oauth_session_id)
+                        logger.info(f"Slack message content (direct PR path): {slack_message}")
+                        
+                        # Call send_slack_message with proper request object
+                        slack_req = SlackMessageRequest(message=slack_message, oauth_session_id=req.oauth_session_id)
+                        await send_slack_message(slack_req)
                         logger.info(f"Slack notification sent for {req.proposal_id}")
                     except Exception as slack_error:
                         logger.warning(f"Slack notification failed: {str(slack_error)}")
+                        import traceback
+                        logger.warning(f"Slack error traceback: {traceback.format_exc()}")
 
                 # Create activity log
                 db_operations.create_activity_log(
@@ -1125,21 +1422,45 @@ The tool will return JSON with a pr_url field. Extract and return only that JSON
         logger.info(f"Full Metorial result text (first 2000 chars): {result.text[:2000]}")
         
         # Look for PR URL in the result text
-        pr_url_match = re.search(r'https://github\.com/[^\s\)]+', result.text)
-        if pr_url_match:
-            pr_url = pr_url_match.group()
-            logger.info(f"Found PR URL via regex: {pr_url}")
+        logger.info(f"Searching for PR URL in result text (length: {len(result.text)} chars)")
+        
+        # Try multiple patterns to find PR URL
+        pr_url_patterns = [
+            r'https://github\.com/[^\s\)\]]+',  # Standard GitHub URL
+            r'https://github\.com/[^\s\)\]]+/pull/\d+',  # Direct PR URL
+            r'pr_url["\']?\s*[:=]\s*["\']?(https://github\.com/[^\s"\'\)]+)',  # JSON-like format
+        ]
+        
+        for pattern in pr_url_patterns:
+            pr_url_match = re.search(pattern, result.text)
+            if pr_url_match:
+                # Extract the URL (handle groups if pattern has them)
+                found_url = pr_url_match.group(1) if pr_url_match.lastindex else pr_url_match.group()
+                if found_url and found_url.startswith('https://github.com'):
+                    pr_url = found_url
+                    logger.info(f"Found PR URL via pattern {pattern}: {pr_url}")
+                    break
         
         # Try to parse as JSON
         json_match = re.search(r'\{.*"pr_url".*\}', result.text, re.DOTALL)
         if json_match:
             try:
                 result_json = json.loads(json_match.group())
-                pr_url = result_json.get("pr_url") or pr_url
+                extracted_pr_url = result_json.get("pr_url")
+                if extracted_pr_url:
+                    pr_url = extracted_pr_url
+                    logger.info(f"Found PR URL via JSON: {pr_url}")
                 branch = result_json.get("branch")
-                logger.info(f"Found PR URL via JSON: {pr_url}, branch: {branch}")
+                if branch:
+                    logger.info(f"Found branch: {branch}")
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse JSON from result: {str(e)}")
+        
+        # Log final PR URL status
+        if pr_url:
+            logger.info(f"Final PR URL: {pr_url}")
+        else:
+            logger.warning(f"PR URL not found in result. Result text preview: {result.text[:500]}")
         
         # Check if tool was called successfully by looking for success indicators
         if not pr_url:
@@ -1216,11 +1537,15 @@ Metorial response: {result.text[:500]}"""
                     slack_message += f"ID: {req.proposal_id}\n"
                     slack_message += f"Description: {req.instruction}\n"
                     slack_message += f"PR: {pr_url}"
+                    logger.info(f"Constructing Slack message with PR URL: {pr_url}")
                 else:
                     slack_message = f"Experiment completed - PR creation failed\n"
                     slack_message += f"ID: {req.proposal_id}\n"
                     slack_message += f"Description: {req.instruction}"
+                    logger.warning(f"PR URL is None, constructing Slack message without PR link")
 
+                logger.info(f"Slack message content: {slack_message}")
+                
                 # Call send_slack_message with proper request object
                 slack_req = SlackMessageRequest(message=slack_message, oauth_session_id=req.oauth_session_id)
                 await send_slack_message(slack_req)
@@ -1280,6 +1605,24 @@ async def send_slack_message(req: SlackMessageRequest):
     Used for notifications and updates.
     """
     try:
+        if not slack_deployment_id:
+            logger.warning("SLACK_DEPLOYMENT_ID not set, cannot send Slack message")
+            raise HTTPException(
+                status_code=400,
+                detail="SLACK_DEPLOYMENT_ID not configured. Please set it in your environment variables."
+            )
+        
+        if not req.oauth_session_id:
+            logger.warning("No OAuth session ID provided for Slack message")
+            raise HTTPException(
+                status_code=400,
+                detail="OAuth session ID is required for Slack notifications. Please connect to Slack first."
+            )
+        
+        logger.info(f"Attempting to send Slack message via deployment {slack_deployment_id}")
+        logger.info(f"OAuth session ID: {req.oauth_session_id[:20]}...")
+        logger.info(f"Message preview: {req.message[:100]}...")
+        
         result = await metorial.run(
             client=openai_client,
             message=f"""Post this message to Slack: "{req.message}"
@@ -1293,19 +1636,53 @@ Use the available Slack tools to post to any public channel.""",
             max_steps=10
         )
 
+        logger.info(f"Metorial Slack call completed. Response: {result.text[:500]}")
+        
+        # Check if Metorial refused to call Slack tools
+        result_lower = result.text.lower()
+        refusal_indicators = [
+            "i'm sorry", "i can't", "i cannot", "unable to", "not able",
+            "refuse", "decline", "cannot assist", "can't help"
+        ]
+        
+        if any(indicator in result_lower for indicator in refusal_indicators):
+            logger.error(f"Metorial refused to call Slack tools. Response: {result.text[:500]}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Slack bot refused to post message. Response: {result.text[:500]}. This may be due to content filters or OAuth session issues."
+            )
+        
+        # Check if there's an error in the response
+        if "error" in result_lower or "failed" in result_lower:
+            logger.warning(f"Potential error in Slack response: {result.text[:500]}")
+        
         return {
             "status": "success",
             "result": result.text
         }
 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to send Slack message: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send Slack message: {str(e)}"
+        )
 
 
 # Repository management endpoints
 
 @app.post("/repositories")
-async def connect_repository(req: ConnectRepositoryRequest):
+async def connect_repository(
+    req: ConnectRepositoryRequest,
+    request: Request,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+):
     """
     Connect a GitHub repository to Northstar.
 
@@ -1315,32 +1692,60 @@ async def connect_repository(req: ConnectRepositoryRequest):
     3. Create or update repository record
     """
     try:
-        # Check if repository already exists
-        existing_repo = db_operations.get_repository(req.repo_fullname)
+        current_user_id = get_user_id_from_request(request, x_user_id)
+        
+        # First check if repository exists globally (without user_id filter)
+        # This handles cases where repo exists but doesn't have user_id or belongs to different user
+        existing_repo = db_operations.get_repository(req.repo_fullname, user_id=None)
         
         if existing_repo:
-            # Update existing repository
+            # Repository exists - update it (may update user_id if it was missing)
             repo = db_operations.update_repository(
                 req.repo_fullname,
                 is_active=True,
                 default_branch=req.default_branch,
-                base_branch=req.base_branch
+                base_branch=req.base_branch,
+                user_id=current_user_id
             )
         else:
-            # Create new repository
-            repo = db_operations.create_repository(
-                repo_fullname=req.repo_fullname,
-                default_branch=req.default_branch,
-                base_branch=req.base_branch
-            )
+            # Repository doesn't exist - create it
+            try:
+                repo = db_operations.create_repository(
+                    repo_fullname=req.repo_fullname,
+                    default_branch=req.default_branch,
+                    base_branch=req.base_branch,
+                    user_id=current_user_id
+                )
+            except Exception as create_error:
+                # If creation fails due to duplicate key, try to get and update it
+                error_str = str(create_error).lower()
+                if "duplicate key" in error_str or "23505" in error_str or "unique constraint" in error_str:
+                    # Repository was created between check and create - get it and update
+                    existing_repo = db_operations.get_repository(req.repo_fullname, user_id=None)
+                    if existing_repo:
+                        repo = db_operations.update_repository(
+                            req.repo_fullname,
+                            is_active=True,
+                            default_branch=req.default_branch,
+                            base_branch=req.base_branch,
+                            user_id=current_user_id
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Repository {req.repo_fullname} already exists but could not be retrieved. Please try again."
+                        )
+                else:
+                    raise
 
-        # Deactivate other repositories
-        all_repos = db_operations.list_repositories()
+        # Deactivate other repositories for this user
+        all_repos = db_operations.list_repositories(user_id=current_user_id)
         for other_repo in all_repos:
             if other_repo.get("repo_fullname") != req.repo_fullname:
                 db_operations.update_repository(
                     other_repo.get("repo_fullname"),
-                    is_active=False
+                    is_active=False,
+                    user_id=current_user_id
                 )
 
         # Create activity log
@@ -1360,12 +1765,17 @@ async def connect_repository(req: ConnectRepositoryRequest):
 
 
 @app.get("/repositories")
-async def list_repositories():
+async def list_repositories(
+    request: Request,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+):
     """
-    List all connected repositories.
+    List all connected repositories for the current user.
     """
     try:
-        repos = db_operations.list_repositories()
+        current_user_id = get_user_id_from_request(request, x_user_id, user_id)
+        repos = db_operations.list_repositories(user_id=current_user_id)
         return {
             "status": "success",
             "repositories": repos,
@@ -1419,14 +1829,19 @@ async def debug_mcp_deployment():
 
 
 @app.get("/repositories/active")
-async def get_active_repository():
+async def get_active_repository(
+    request: Request,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+):
     """
-    Get the currently active repository.
+    Get the currently active repository for the current user.
     
     Returns 404 if no active repository, 200 with repository if found.
     """
     try:
-        repo = db_operations.get_active_repository()
+        current_user_id = get_user_id_from_request(request, x_user_id, user_id)
+        repo = db_operations.get_active_repository(user_id=current_user_id)
         if not repo:
             raise HTTPException(status_code=404, detail="No active repository found")
         return {
@@ -1449,9 +1864,16 @@ async def get_active_repository():
 # GET endpoints for retrieving data from Supabase
 
 @app.get("/proposals")
-async def get_proposals(status: Optional[str] = None, limit: int = 50, repo_id: Optional[str] = None):
+async def get_proposals(
+    request: Request,
+    status: Optional[str] = None,
+    limit: int = 50,
+    repo_id: Optional[str] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+):
     """
-    Get list of proposals, optionally filtered by status or repository.
+    Get list of proposals for the current user, optionally filtered by status or repository.
 
     Query params:
     - status: Optional filter (pending, approved, rejected, executing, completed)
@@ -1459,7 +1881,8 @@ async def get_proposals(status: Optional[str] = None, limit: int = 50, repo_id: 
     - repo_id: Optional repository ID filter
     """
     try:
-        proposals = db_operations.list_proposals(limit=limit, status=status, repo_id=repo_id)
+        current_user_id = get_user_id_from_request(request, x_user_id, user_id)
+        proposals = db_operations.list_proposals(limit=limit, status=status, repo_id=repo_id, user_id=current_user_id)
         return {
             "status": "success",
             "proposals": proposals,
@@ -1489,16 +1912,23 @@ async def get_proposal(proposal_id: str):
 
 
 @app.get("/experiments")
-async def get_experiments(status: Optional[str] = None, limit: int = 50):
+async def get_experiments(
+    request: Request,
+    status: Optional[str] = None,
+    limit: int = 50,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+):
     """
-    Get list of experiments, optionally filtered by status.
+    Get list of experiments for the current user, optionally filtered by status.
 
     Query params:
     - status: Optional filter (running, completed, failed, cancelled)
     - limit: Maximum number of experiments to return (default: 50)
     """
     try:
-        experiments = db_operations.list_experiments(limit=limit, status=status)
+        current_user_id = get_user_id_from_request(request, x_user_id, user_id)
+        experiments = db_operations.list_experiments(limit=limit, status=status, user_id=current_user_id)
         return {
             "status": "success",
             "experiments": experiments,
@@ -1553,15 +1983,21 @@ async def get_experiment_by_proposal(proposal_id: str):
 
 
 @app.get("/activity-logs")
-async def get_activity_logs(limit: int = 50):
+async def get_activity_logs(
+    request: Request,
+    limit: int = 50,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    user_id: Optional[str] = Query(None)
+):
     """
-    Get recent activity logs.
+    Get recent activity logs for the current user.
 
     Query params:
     - limit: Maximum number of logs to return (default: 50)
     """
     try:
-        logs = db_operations.list_activity_logs(limit=limit)
+        current_user_id = get_user_id_from_request(request, x_user_id, user_id)
+        logs = db_operations.list_activity_logs(limit=limit, user_id=current_user_id)
         return {
             "status": "success",
             "logs": logs,

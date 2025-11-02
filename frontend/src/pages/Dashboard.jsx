@@ -7,119 +7,16 @@ import { proposalsAPI, experimentsAPI, activityLogsAPI, repositoriesAPI } from '
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const [proposals, setProposals] = useState([
-    {
-      proposal_id: 1,
-      idea_summary: 'Reduce checkout form fields',
-      status: 'completed',
-      expected_impact: { delta_pct: 0.003, metric: 'Checkout Conversion' },
-      rationale: 'Simplified checkout flow by removing optional fields',
-      repo_id: 'unassigned',
-    },
-    {
-      proposal_id: 2,
-      idea_summary: 'Add trust badges to checkout',
-      status: 'approved',
-      expected_impact: { delta_pct: 0.002, metric: 'Checkout Conversion' },
-      rationale: 'Testing security badges above payment button',
-      repo_id: 'unassigned',
-    },
-    {
-      proposal_id: 3,
-      idea_summary: 'Optimize mobile checkout layout',
-      status: 'approved',
-      expected_impact: { delta_pct: 0.005, metric: 'Checkout Conversion' },
-      rationale: 'Improve mobile UX for checkout process',
-      repo_id: 'unassigned',
-    },
-    {
-      proposal_id: 4,
-      idea_summary: 'A/B test payment button color',
-      status: 'approved',
-      expected_impact: { delta_pct: 0.001, metric: 'Checkout Conversion' },
-      rationale: 'Testing green vs blue payment button',
-      repo_id: 'unassigned',
-    },
-  ]);
-  const [rawExperiments, setRawExperiments] = useState([
-    {
-      id: 2,
-      proposal_id: 2,
-      instruction: 'Add trust badges to checkout',
-      status: 'running',
-      pr_url: null,
-    },
-    {
-      id: 4,
-      proposal_id: 4,
-      instruction: 'A/B test payment button color',
-      status: 'running',
-      pr_url: null,
-    },
-  ]); // Store raw experiment data
-  const [experiments, setExperiments] = useState([
-    {
-      id: 1,
-      title: 'Reduce checkout form fields',
-      status: 'completed',
-      result: '0.3% improvement',
-      description: 'Simplified checkout flow by removing optional fields',
-      proposal_id: 1,
-    },
-    {
-      id: 2,
-      title: 'Add trust badges to checkout',
-      status: 'running',
-      result: 'In progress...',
-      description: 'Testing security badges above payment button',
-      proposal_id: 2,
-    },
-    {
-      id: 3,
-      title: 'Optimize mobile checkout layout',
-      status: 'approved',
-      result: 'Approved',
-      description: 'Improve mobile UX for checkout process',
-      proposal_id: 3,
-    },
-    {
-      id: 4,
-      title: 'A/B test payment button color',
-      status: 'running',
-      result: 'In progress...',
-      description: 'Testing green vs blue payment button',
-      proposal_id: 4,
-    },
-  ]); // Displayed experiments
-  const [activityLogs, setActivityLogs] = useState([
-    {
-      message: 'Analyzing checkout conversion trends...',
-      timestamp: 'Just now',
-    },
-    {
-      message: 'Detected +0.3% improvement in conversion rate',
-      timestamp: '2 minutes ago',
-    },
-    {
-      message: 'Reviewing experiment results from last week',
-      timestamp: '15 minutes ago',
-    },
-    {
-      message: 'Identified potential optimization in checkout flow',
-      timestamp: '1 hour ago',
-    },
-    {
-      message: 'Monitoring metric performance across mobile and desktop',
-      timestamp: '3 hours ago',
-    },
-  ]);
+  const [proposals, setProposals] = useState([]);
+  const [rawExperiments, setRawExperiments] = useState([]); // Store raw experiment data
+  const [experiments, setExperiments] = useState([]); // Displayed experiments
+  const [activityLogs, setActivityLogs] = useState([]);
   const [repositories, setRepositories] = useState([]);
   const [selectedRepo, setSelectedRepo] = useState(null); // null = all repos
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    // Comment out loadData to show demo data
-    // loadData();
+    loadData();
   }, []);
 
   useEffect(() => {
@@ -154,10 +51,13 @@ const Dashboard = () => {
     
     // Group proposals by repo_id
     proposals.forEach(p => {
-      const repoId = p.repo_id || 'unassigned';
+      // Handle both string UUIDs and object repo_id references
+      const repoId = p.repo_id ? (typeof p.repo_id === 'string' ? p.repo_id : p.repo_id) : 'unassigned';
       if (!grouped[repoId]) {
+        // Try to get repo info from the proposal if it includes repository data from join
+        const repoInfo = p.repositories || (repoMap[repoId] ? { repo_fullname: repoMap[repoId].repo_fullname, owner: repoMap[repoId].owner, repo_name: repoMap[repoId].repo_name } : null);
         grouped[repoId] = {
-          repo: repoMap[repoId] || { repo_fullname: 'Unknown', owner: '', repo_name: 'Unknown' },
+          repo: repoInfo || repoMap[repoId] || { repo_fullname: 'Unassigned', owner: '', repo_name: 'Unassigned' },
           proposals: [],
           experiments: []
         };
@@ -172,6 +72,8 @@ const Dashboard = () => {
           ? 'Rejected'
           : p.status === 'approved'
           ? 'Approved'
+          : p.status === 'executing'
+          ? 'Executing'
           : 'Pending',
         description: p.rationale || '',
         proposal_id: p.proposal_id,
@@ -182,21 +84,39 @@ const Dashboard = () => {
     rawExperiments.forEach(e => {
       // Find the proposal for this experiment
       const proposal = proposals.find(p => p.proposal_id === e.proposal_id);
-      const repoId = proposal?.repo_id || 'unassigned';
+      const repoId = proposal?.repo_id ? (typeof proposal.repo_id === 'string' ? proposal.repo_id : proposal.repo_id) : 'unassigned';
       if (!grouped[repoId]) {
+        const repoInfo = proposal?.repositories || repoMap[repoId];
         grouped[repoId] = {
-          repo: { repo_fullname: 'Unknown', owner: '', repo_name: 'Unknown' },
+          repo: repoInfo || { repo_fullname: 'Unassigned', owner: '', repo_name: 'Unassigned' },
           proposals: [],
           experiments: []
         };
       }
+      
+      // Format result text based on status
+      let resultText = 'In progress...';
+      if (e.status === 'completed') {
+        if (e.metric_delta !== null && e.metric_delta !== undefined) {
+          resultText = `${e.metric_delta > 0 ? '+' : ''}${(e.metric_delta * 100).toFixed(2)}%`;
+        } else if (e.result_summary) {
+          resultText = e.result_summary;
+        } else {
+          resultText = 'Completed';
+        }
+      } else if (e.status === 'failed') {
+        resultText = 'Failed';
+      } else if (e.status === 'cancelled') {
+        resultText = 'Cancelled';
+      } else if (e.pr_url) {
+        resultText = `PR: ${e.pr_url.split('/').pop()}`;
+      }
+      
       grouped[repoId].experiments.push({
         id: e.id || e.proposal_id,
         title: e.instruction || 'Experiment',
-        status: e.status === 'running' ? 'running' : e.status === 'completed' ? 'completed' : 'running',
-        result: e.pr_url 
-          ? `PR: ${e.pr_url.split('/').pop()}`
-          : 'In progress...',
+        status: e.status || 'running',
+        result: resultText,
         description: e.instruction || '',
         proposal_id: e.proposal_id,
       });
@@ -213,8 +133,6 @@ const Dashboard = () => {
     }
   };
 
-  // Commented out to show demo data - uncomment when backend is ready
-  // eslint-disable-next-line no-unused-vars
   const loadData = async () => {
     setLoading(true);
     try {
@@ -229,17 +147,24 @@ const Dashboard = () => {
         activityLogsAPI.list(10),
       ]);
 
-      // Store raw proposals for organization
-      setProposals(proposalsResult.proposals);
+      // Store raw proposals for organization (handle both array and object response formats)
+      const proposalsList = Array.isArray(proposalsResult.proposals) 
+        ? proposalsResult.proposals 
+        : proposalsResult.proposals || [];
+      setProposals(proposalsList);
       
       // Store raw experiments - will be organized by organizeByRepository useEffect
-      setRawExperiments(experimentsResult.experiments);
+      const experimentsList = Array.isArray(experimentsResult.experiments)
+        ? experimentsResult.experiments
+        : experimentsResult.experiments || [];
+      setRawExperiments(experimentsList);
       
-      // Format activity logs - fallback to demo data if no logs
+      // Format activity logs
       let formattedLogs = [];
+      const logsList = Array.isArray(logsResult.logs) ? logsResult.logs : (logsResult.logs || []);
 
-      if (logsResult.logs && logsResult.logs.length > 0) {
-        formattedLogs = logsResult.logs.map(log => {
+      if (logsList.length > 0) {
+        formattedLogs = logsList.map(log => {
           const date = new Date(log.created_at);
           const now = new Date();
           const diffMs = now - date;
@@ -258,58 +183,15 @@ const Dashboard = () => {
             timestamp,
           };
         });
-      } else {
-        // Demo agent activity
-        formattedLogs = [
-          {
-            message: 'Analyzing checkout conversion trends...',
-            timestamp: 'Just now',
-          },
-          {
-            message: 'Detected +0.3% improvement in conversion rate',
-            timestamp: '2 minutes ago',
-          },
-          {
-            message: 'Reviewing experiment results from last week',
-            timestamp: '15 minutes ago',
-          },
-          {
-            message: 'Identified potential optimization in checkout flow',
-            timestamp: '1 hour ago',
-          },
-          {
-            message: 'Monitoring metric performance across mobile and desktop',
-            timestamp: '3 hours ago',
-          },
-        ];
       }
 
       setActivityLogs(formattedLogs);
     } catch (error) {
       console.error('Failed to load data:', error);
-      // Show demo data on error
-      setActivityLogs([
-        {
-          message: 'Analyzing checkout conversion trends...',
-          timestamp: 'Just now',
-        },
-        {
-          message: 'Detected +0.3% improvement in conversion rate',
-          timestamp: '2 minutes ago',
-        },
-        {
-          message: 'Reviewing experiment results from last week',
-          timestamp: '15 minutes ago',
-        },
-        {
-          message: 'Identified potential optimization in checkout flow',
-          timestamp: '1 hour ago',
-        },
-        {
-          message: 'Monitoring metric performance across mobile and desktop',
-          timestamp: '3 hours ago',
-        },
-      ]);
+      // On error, keep empty arrays (no demo data)
+      setProposals([]);
+      setRawExperiments([]);
+      setActivityLogs([]);
     } finally {
       setLoading(false);
     }

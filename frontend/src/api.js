@@ -1,18 +1,49 @@
+import { supabase } from '../supabaseClient';
+
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// Helper to get current user ID
+async function getUserId() {
+  const { data: { user } } = await supabase.auth.getUser();
+  return user?.id || null;
+}
 
 // Helper function for API calls
 async function apiCall(endpoint, options = {}) {
-  const url = `${API_URL}${endpoint}`;
+  // Get user ID from Supabase auth
+  let userId = null;
+  try {
+    userId = await getUserId();
+  } catch (error) {
+    console.warn('Could not get user ID:', error);
+  }
+  
+  // Add user_id as query param for GET requests
+  let finalEndpoint = endpoint;
+  if (userId && (!options.method || options.method === 'GET')) {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    finalEndpoint = `${endpoint}${separator}user_id=${userId}`;
+  }
+  
+  const url = `${API_URL}${finalEndpoint}`;
+  
   const config = {
     headers: {
       'Content-Type': 'application/json',
+      ...(userId && { 'X-User-ID': userId }),
       ...options.headers,
     },
     ...options,
   };
 
   if (options.body) {
-    config.body = JSON.stringify(options.body);
+    // Include user_id in request body if it's a POST/PUT request
+    if (userId && (options.method === 'POST' || options.method === 'PUT')) {
+      const bodyObj = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
+      config.body = JSON.stringify({ ...bodyObj, user_id: userId });
+    } else {
+      config.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    }
   }
 
   try {

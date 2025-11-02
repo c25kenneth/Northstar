@@ -234,7 +234,7 @@ const createUnifiedDiff = (oldCode, newCode) => {
 const CodeDiff = ({ updateBlock, filePath = null }) => {
   const parsed = parseUpdateBlock(updateBlock);
   const { oldCode, newCode, hasChanges, unifiedDiff } = parsed;
-  const [showUnified, setShowUnified] = useState(false); // Default to side-by-side view
+  const [showUnified, setShowUnified] = useState(false); // Default to side-by-side view (old vs new)
 
   // If we have unified diff format, map it to diff array; otherwise create from old/new code
   const diff = unifiedDiff 
@@ -274,8 +274,9 @@ const CodeDiff = ({ updateBlock, filePath = null }) => {
         <button
           onClick={() => setShowUnified(!showUnified)}
           className="text-xs px-3 py-1.5 rounded-md text-gray-300 hover:bg-white/5 hover:text-white transition-colors border border-white/10"
+          title={showUnified ? 'Switch to side-by-side view' : 'Switch to unified diff view'}
         >
-          {showUnified ? '↔ Side-by-Side' : '📋 Unified (PR Style)'}
+          {showUnified ? '↔ Old vs New' : '📋 Unified Diff'}
         </button>
       </div>
 
@@ -341,55 +342,96 @@ const CodeDiff = ({ updateBlock, filePath = null }) => {
           </table>
         </div>
       ) : (
-        /* Side-by-Side Diff View (GitHub Style) */
+        /* Side-by-Side Diff View - Old vs New */
         <div className="grid grid-cols-2 divide-x divide-white/10 overflow-hidden">
-          {/* Old Code */}
-          <div className="relative flex flex-col min-h-[200px]">
-            <div className="sticky top-0 bg-red-500/10 border-b border-red-500/30 px-4 py-2 flex-shrink-0 flex items-center justify-between">
-              <span className="text-xs font-medium text-red-400">Current Code</span>
-              <span className="text-xs text-red-400/60">{oldCode.split('\n').filter(l => l.trim()).length} lines</span>
+          {/* Old Code (Left Side) */}
+          <div className="relative flex flex-col min-h-[300px] max-h-[600px]">
+            <div className="sticky top-0 bg-red-500/20 border-b border-red-500/40 px-4 py-3 flex-shrink-0 flex items-center justify-between z-10">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-red-300 uppercase tracking-wide">OLD CODE</span>
+                <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400">
+                  {oldCode.split('\n').filter(l => l.trim()).length} lines
+                </span>
+              </div>
             </div>
             <div className="overflow-auto flex-1 bg-red-500/5">
-              <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words">
-                {oldCode || <span className="text-gray-500 italic">No previous code</span>}
+              <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
+                {(() => {
+                  // Show old code with highlighting for removed/changed lines
+                  // IMPORTANT: Show ALL lines, including placeholders for added lines
+                  if (unifiedDiff && unifiedDiff.length > 0) {
+                    return unifiedDiff.map((entry, idx) => {
+                      if (entry.type === 'removed') {
+                        return (
+                          <span key={idx} className="block bg-red-500/20 border-l-2 border-red-500 pl-2 py-0.5 my-0.5">
+                            <span className="text-red-400 line-through opacity-70">{entry.content}</span>
+                          </span>
+                        );
+                      } else if (entry.type === 'unchanged') {
+                        return <span key={idx} className="block">{entry.content}{'\n'}</span>;
+                      } else if (entry.type === 'added') {
+                        // For added lines in old code, show empty space to maintain alignment
+                        return <span key={idx} className="block opacity-30 text-gray-500">{'\u00A0'}</span>;
+                      }
+                      return null;
+                    });
+                  }
+                  
+                  // Fallback: show old code as-is - split by lines to preserve all lines
+                  if (oldCode) {
+                    return oldCode.split('\n').map((line, idx) => (
+                      <span key={idx} className="block">{line}{'\n'}</span>
+                    ));
+                  }
+                  return <span className="text-gray-500 italic">No previous code</span>;
+                })()}
               </pre>
             </div>
           </div>
 
-          {/* New Code */}
-          <div className="relative flex flex-col min-h-[200px]">
-            <div className="sticky top-0 bg-green-500/10 border-b border-green-500/30 px-4 py-2 flex-shrink-0 flex items-center justify-between">
-              <span className="text-xs font-medium text-green-400">New Code</span>
-              <span className="text-xs text-green-400/60">{newCode.split('\n').filter(l => l.trim()).length} lines</span>
+          {/* New Code (Right Side) */}
+          <div className="relative flex flex-col min-h-[300px] max-h-[600px]">
+            <div className="sticky top-0 bg-green-500/20 border-b border-green-500/40 px-4 py-3 flex-shrink-0 flex items-center justify-between z-10">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-green-300 uppercase tracking-wide">NEW CODE</span>
+                <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">
+                  {newCode.split('\n').filter(l => l.trim()).length} lines
+                </span>
+              </div>
             </div>
             <div className="overflow-auto flex-1 bg-green-500/5">
-              <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words">
+              <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
                 {(() => {
                   // Use unifiedDiff if available for accurate change detection
+                  // IMPORTANT: Show ALL lines, including placeholders for removed lines
                   if (unifiedDiff && unifiedDiff.length > 0) {
-                    return unifiedDiff
-                      .filter(entry => entry.type === 'added' || entry.type === 'unchanged')
-                      .map((entry, idx) => {
-                        if (entry.type === 'added') {
-                          // Only highlight lines that were actually added/changed
-                          return (
-                            <span key={idx} className="text-green-400 bg-green-500/10 px-0.5 rounded inline-block">
-                              {entry.content}
-                              {'\n'}
-                            </span>
-                          );
-                        } else {
-                          // Unchanged line - no highlight
-                          return <span key={idx}>{entry.content}{'\n'}</span>;
-                        }
-                      });
+                    return unifiedDiff.map((entry, idx) => {
+                      if (entry.type === 'added') {
+                        // Highlight added lines
+                        return (
+                          <span key={idx} className="block bg-green-500/20 border-l-2 border-green-500 pl-2 py-0.5 my-0.5">
+                            <span className="text-green-400">{entry.content}</span>
+                          </span>
+                        );
+                      } else if (entry.type === 'unchanged') {
+                        // Unchanged line - no highlight
+                        return <span key={idx} className="block">{entry.content}{'\n'}</span>;
+                      } else if (entry.type === 'removed') {
+                        // For removed lines in new code, show empty space to maintain alignment
+                        return <span key={idx} className="block opacity-30 text-gray-500">{'\u00A0'}</span>;
+                      }
+                      return null;
+                    });
                   }
                   
                   // Fallback: compare newCode with oldCode line by line
+                  // Show ALL lines to avoid truncation
                   const newLines = newCode.split('\n');
                   const oldLines = oldCode.split('\n');
+                  const maxLines = Math.max(newLines.length, oldLines.length);
                   
-                  return newLines.map((line, idx) => {
+                  return Array.from({ length: maxLines }, (_, idx) => {
+                    const line = newLines[idx] || '';
                     const correspondingOldLine = oldLines[idx] || '';
                     // Only highlight if line content is actually different (not just whitespace)
                     const lineContent = line.trim();
@@ -400,16 +442,15 @@ const CodeDiff = ({ updateBlock, filePath = null }) => {
                     const isNewlyAdded = lineContent && !oldLineContent;
                     
                     if (isActuallyChanged || isNewlyAdded) {
-                      // Show changed/added line with subtle highlighting
+                      // Show changed/added line with highlighting
                       return (
-                        <span key={idx} className="text-green-400 bg-green-500/10 px-0.5 rounded">
-                          {line}
-                          {'\n'}
+                        <span key={idx} className="block bg-green-500/20 border-l-2 border-green-500 pl-2 py-0.5 my-0.5">
+                          <span className="text-green-400">{line}</span>
                         </span>
                       );
                     } else {
-                      // Unchanged line - no highlight
-                      return <span key={idx}>{line}{'\n'}</span>;
+                      // Unchanged line or empty - no highlight
+                      return <span key={idx} className="block">{line}{'\n'}</span>;
                     }
                   });
                 })()}
