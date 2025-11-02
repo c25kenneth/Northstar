@@ -136,6 +136,13 @@ const ExperimentDetails = () => {
     { name: 'After', value: 1.0 + (proposal.expected_impact.delta_pct || 0), color: '#5AB9EA' },
   ] : [];
 
+  // Calculate Y-axis domain to show differences clearly but not excessively
+  const maxValue = Math.max(...resultsData.map(d => d.value));
+  const minValue = Math.min(...resultsData.map(d => d.value));
+  const range = maxValue - minValue;
+  const yAxisMin = Math.max(0, minValue - range * 0.5);
+  const yAxisMax = maxValue + range * 0.5;
+
   return (
     <div className="min-h-screen bg-[#111827]">
       <div className="mx-auto max-w-5xl px-6 py-8 lg:px-8">
@@ -343,7 +350,7 @@ const ExperimentDetails = () => {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={resultsData}>
                 <XAxis dataKey="name" stroke="#6B7280" />
-                <YAxis stroke="#6B7280" domain={[0, 3]} />
+                <YAxis stroke="#6B7280" domain={[yAxisMin, yAxisMax]} />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#111827',
