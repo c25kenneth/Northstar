@@ -12,6 +12,9 @@
 *.pyo
 *.pyd
 .Python
+venv/
+*.egg-info/
+uv.lock
 
 # Node
 node_modules/
@@ -23,6 +26,7 @@ dist/
 .idea/
 *.swp
 *.swo
+.claude/
 
 # OS
 .DS_Store

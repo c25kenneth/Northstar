@@ -1,92 +1,115 @@
 # Northstar
 
-Autonomous AI agent that proposes, executes, and learns from product experiments.
+An AI agent that lives in Slack, proposes experiments, and ships code.
 
-## Overview
+Northstar exists because product iteration has become the new bottleneck—and AI can now close the loop between insight, code, and impact.
 
-Northstar uses Metorial's MCP protocol to orchestrate AI-powered code changes via Morph, creating real GitHub PRs for human review.
-
-**Key Features:**
-- AI-generated experiment proposals
-- Automated code editing with Morph Fast Apply
-- Real GitHub PR creation
-- Slack integration for approvals
-
-## Architecture
+## What it does
 
 ```
-Slack/API → FastAPI → Metorial (AI Orchestrator)
-                         ↓
-              ┌──────────┼──────────┐
-              ↓          ↓          ↓
-         Northstar   GitHub     Slack
-         MCP Tools   MCP        MCP
-              ↓
-         Morph API
+You: "northstar, how are our DAUs looking?"
+Northstar: "DAUs at 2,847 users, up 18% from last week.
+           Mobile engagement increased 31% after navigation improvements."
+
+You: "propose an experiment to improve retention"
+Northstar: [Analyzes codebase, proposes experiment with confidence scores]
+
+You: "make it happen"
+Northstar: "PR #47 is up. This should improve perceived performance
+           without touching backend."
 ```
 
-## Quick Start
+Northstar analyzes your analytics, understands your codebase, proposes changes, and opens PRs. All from Slack.
 
-### 1. Set Up Supabase Database
+## System Overview
 
-1. Create a Supabase project at https://supabase.com
-2. Run the SQL schema from `backend/SUPABASE_SCHEMA.md` in Supabase SQL Editor
-3. Get your Supabase URL and Service Role Key from Project Settings → API
+We built a two-stage system to keep latency under 1 second for most queries:
 
-### 2. Backend Setup
+**Stage 1: Triage** (200ms)
+```python
+# Fast classification determines which tools are needed
+CASUAL_CHAT       → Slack only
+REPO_ANALYSIS     → Captain knowledge base + Slack
+ANALYTICS_QUERY   → PostHog + Slack
+CODE_CHANGE       → GitHub + Northstar MCP + Slack
+EXPERIMENT_PROPOSAL → All tools
+```
 
+**Stage 2: Execute**
+```
+Only loads the MCP servers needed for this specific request
+├─ Slack MCP (OAuth-enabled)
+├─ GitHub MCP (PR creation)
+├─ PostHog MCP (analytics)
+└─ Northstar MCP (custom experiment tools)
+```
+
+The triage pattern means simple queries don't pay the cost of loading unused tools.
+
+### Stack
+
+```
+Slack Events API
+    ↓
+FastAPI + Background Tasks
+    ↓
+Metorial MCP Orchestration (GPT-4o)
+    ↓
+    ├─ Slack MCP
+    ├─ GitHub MCP
+    ├─ PostHog MCP
+    └─ Northstar MCP → Morph API (code generation)
+```
+
+Data layer: Supabase for experiment tracking and state.
+
+Knowledge layer: Captain for codebase indexing (infinite context windows).
+
+## Setup
+
+**Prerequisites:** Python 3.12+, Node.js 18+, UV package manager
+
+**Backend:**
 ```bash
 cd backend
-
-# Create .env file with required variables (see SETUP.md for details)
-# Required: METORIAL_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GITHUB_TOKEN, MORPH_API_KEY
-
-# Install dependencies
 uv sync
-
-# Run the server
+cp .env.example .env  # Add API keys
 uvicorn main:app --reload
 ```
 
-Backend will run on `http://localhost:8000`
-
-### 3. Frontend Setup
-
+**Frontend:**
 ```bash
 cd frontend
-
-# Create .env file with:
-# VITE_API_URL=http://localhost:8000
-# VITE_SUPABASE_URL=your_supabase_url
-# VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Install dependencies
 npm install
-
-# Run the dev server
+cp .env.example .env  # Add Supabase credentials
 npm run dev
 ```
 
-Frontend will run on `http://localhost:5173`
+**Database:** Create Supabase project, run schema from `backend/SUPABASE_SCHEMA.md`
 
-### 4. Initial Setup in App
+Connect a GitHub repo through the frontend at `localhost:5173`, then start messaging in Slack.
 
-1. Open `http://localhost:5173`
-2. Go to Settings page
-3. Connect GitHub repository (format: `owner/repo`)
-4. (Optional) Connect Slack workspace
-5. Trigger your first experiment!
+## Implementation notes
 
-## Detailed Setup
+- 2,616 lines in `main.py` (core orchestrator)
+- Type-safe with comprehensive hints throughout
+- Async-first with FastAPI background tasks
+- Agent personality system makes responses feel like a calm engineer, not a chatbot
+- Rich Slack markdown formatting (no blocks, just clean text)
 
-See [SETUP.md](./SETUP.md) for complete setup instructions, environment variables, and troubleshooting.
+The triage system was the key architectural choice. Loading all MCP servers upfront added 3-5s latency even for "hey northstar" queries. Now simple messages respond in under a second.
 
-## Tech Stack
+## What's next
 
-- **Backend:** FastAPI, Metorial SDK, Morph API, GitPython, PyGithub
-- **Frontend:** React 19, Vite 7, TailwindCSS 4
-- **AI:** OpenAI GPT-4o, Metorial MCP Protocol
+- Feed PR outcomes back into confidence models
+- Multi-repo coordination for microservices
+- Automatic A/B test creation with feature flags
+- Slack threads for full conversation context
 
-## License
+## Built with
 
-MIT
+[Metorial](https://metorial.com), [Morph](https://morphllm.com), [Captain](https://runcaptain.com), [PostHog](https://posthog.com), [Supabase](https://supabase.com), FastAPI, React, TailwindCSS
+
+---
+
+Built for YC Agent Hacks, January 2025
