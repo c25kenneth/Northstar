@@ -27,34 +27,59 @@ Slack/API → FastAPI → Metorial (AI Orchestrator)
 
 ## Quick Start
 
-### Backend
+### 1. Set Up Supabase Database
+
+1. Create a Supabase project at https://supabase.com
+2. Run the SQL schema from `backend/SUPABASE_SCHEMA.md` in Supabase SQL Editor
+3. Get your Supabase URL and Service Role Key from Project Settings → API
+
+### 2. Backend Setup
 
 ```bash
 cd backend
+
+# Create .env file with required variables (see SETUP.md for details)
+# Required: METORIAL_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GITHUB_TOKEN, MORPH_API_KEY
+
+# Install dependencies
 uv sync
+
+# Run the server
 uvicorn main:app --reload
 ```
 
-### Frontend
+Backend will run on `http://localhost:8000`
+
+### 3. Frontend Setup
 
 ```bash
 cd frontend
+
+# Create .env file with:
+# VITE_API_URL=http://localhost:8000
+# VITE_SUPABASE_URL=your_supabase_url
+# VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+
+# Install dependencies
 npm install
+
+# Run the dev server
 npm run dev
 ```
 
-## Environment Setup
+Frontend will run on `http://localhost:5173`
 
-Copy `backend/.env.example` to `backend/.env` and configure:
+### 4. Initial Setup in App
 
-```bash
-METORIAL_API_KEY=your_key
-SLACK_DEPLOYMENT_ID=your_deployment
-GITHUB_TOKEN=your_token
-MORPH_API_KEY=your_key
-TARGET_REPO=owner/repo
-TARGET_FILE=index.html
-```
+1. Open `http://localhost:5173`
+2. Go to Settings page
+3. Connect GitHub repository (format: `owner/repo`)
+4. (Optional) Connect Slack workspace
+5. Trigger your first experiment!
+
+## Detailed Setup
+
+See [SETUP.md](./SETUP.md) for complete setup instructions, environment variables, and troubleshooting.
 
 ## Tech Stack
 
