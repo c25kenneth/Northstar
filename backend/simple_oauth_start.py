@@ -20,10 +20,12 @@ async def start_oauth():
 
     try:
         # Start OAuth using Metorial SDK
-        result = await metorial.oauth.start(SLACK_DEPLOYMENT_ID)
+        oauth_session = metorial.oauth.sessions.create(
+            server_deployment_id=SLACK_DEPLOYMENT_ID
+        )
 
-        auth_url = result.get("authorizationUrl") or result.get("authorization_url")
-        session_id = result.get("sessionId") or result.get("session_id")
+        auth_url = oauth_session.url
+        session_id = oauth_session.id
 
         print("✓ OAuth flow started successfully!\n")
         print(f"Session ID: {session_id}\n")
