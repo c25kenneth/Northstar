@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="./frontend/src/assets/DarkModeWordmark.png"alt="Northstar Wordmark">
+</p>
+
 # Northstar
 
-An AI agent that lives in Slack, proposes experiments, and ships code.
+Your autonomous teammate in Slack that proposes experiments and ships code.
 
-Northstar exists because product iteration has become the new bottleneck—and AI can now close the loop between insight, code, and impact.
+Northstar exists because product iteration has become the new bottleneck, and AI can now close the loop between insight, code, and impact.
 
 ## What it does
 
@@ -17,15 +21,18 @@ Northstar: [Analyzes codebase, proposes experiment with confidence scores]
 You: "make it happen"
 Northstar: "PR #47 is up. This should improve perceived performance
            without touching backend."
+
+You: "nice work"
+Northstar: "Merged successfully. Monitoring retention impact."
 ```
 
-Northstar analyzes your analytics, understands your codebase, proposes changes, and opens PRs. All from Slack.
+Northstar analyzes your product data, understands your codebase, proposes changes, and opens PRs. All from Slack.
 
 ## System Overview
 
-We built a two-stage system to keep latency under 1 second for most queries:
+Northstar uses a two-stage system to keep latency under 1 second for most queries:
 
-**Stage 1: Triage** (200ms)
+**Stage 1: Intent Detection** (200ms)
 ```python
 # Fast classification determines which tools are needed
 CASUAL_CHAT       → Slack only
@@ -58,12 +65,12 @@ Metorial MCP Orchestration (GPT-4o)
     ├─ Slack MCP
     ├─ GitHub MCP
     ├─ PostHog MCP
-    └─ Northstar MCP → Morph API (code generation)
+    └─ Custom Northstar MCP → Morph API (code generation)
 ```
 
 Data layer: Supabase for experiment tracking and state.
 
-Knowledge layer: Captain for codebase indexing (infinite context windows).
+Knowledge layer: Captain for codebase indexing (unbounded context windows).
 
 ## Setup
 
@@ -101,10 +108,10 @@ The triage system was the key architectural choice. Loading all MCP servers upfr
 
 ## What's next
 
-- Feed PR outcomes back into confidence models
-- Multi-repo coordination for microservices
-- Automatic A/B test creation with feature flags
-- Slack threads for full conversation context
+- Making integration take 10 minutes -> < 1 minute
+- Getting 3–5 pilot teams — [Talk to us if you're interested](https://tally.so/r/worWMX)
+- Iterating based on customer feedback
+- Applying to YC W26
 
 ## Built with
 
@@ -112,4 +119,4 @@ The triage system was the key architectural choice. Loading all MCP servers upfr
 
 ---
 
-Built for YC Agent Hacks, January 2025
+Originally Built for YC Agent Jam, November 2025
