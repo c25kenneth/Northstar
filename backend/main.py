@@ -407,31 +407,61 @@ User-provided codebase context:
         else:
             repo_context = await fetch_repository_context(repo_fullname, active_repo)
         
+        # Validate that we have actual code context
+        if not repo_context or len(repo_context.strip()) < 100:
+            error_msg = f"Insufficient codebase context. Repository context is too short ({len(repo_context) if repo_context else 0} chars)."
+            if "GITHUB_TOKEN not set" in repo_context:
+                error_msg += " Please set GITHUB_TOKEN in your backend environment variables to automatically fetch code from GitHub, or provide codebase_context in the request."
+            else:
+                error_msg += " Please ensure GITHUB_TOKEN is set in the backend environment, or provide codebase_context in the request."
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
+        
+        # Check if repo_context looks like an error message instead of actual code
+        if "GITHUB_TOKEN not set" in repo_context or "Note:" in repo_context:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot fetch repository code. {repo_context}. Please set GITHUB_TOKEN in your backend environment variables, or provide codebase_context in the request with the actual repository code."
+            )
+        
         try:
             if northstar_mcp_deployment_id:
                 # Try to use propose_experiment tool
                 result = await metorial.run(
                     client=openai_client,
                     message=f"""
-                    Use the propose_experiment tool to generate an experiment proposal.
+                    CALL THE propose_experiment TOOL IMMEDIATELY. The codebase context is provided below - you don't need to fetch anything, just analyze what's provided.
                     
-                    Repository context:
-                    {repo_context}
-                    
-                    Return the proposal as JSON with the following format:
+                    STEP 1: Call propose_experiment tool RIGHT NOW with these parameters:
                     {{
-                        "proposal_id": "exp-001",
-                        "idea_summary": "Brief summary",
-                        "rationale": "Reasoning behind the proposal",
-                        "expected_impact": {{"metric": "conversion_rate", "delta_pct": 0.05}},
-                        "technical_plan": [{{"file": "path/to/file", "action": "description"}}],
-                        "category": "category_name",
-                        "confidence": 0.8
+                      "codebase_context": "{repo_context[:4000]}...",
+                      "repo_fullname": "{repo_fullname}"
                     }}
+                    
+                    IMPORTANT: The codebase_context parameter ALREADY CONTAINS the actual repository code below. You don't need to fetch anything - the code is provided for you. Just analyze it.
+                    
+                    Full codebase context (first 4000 chars):
+                    {repo_context[:4000]}
+                    
+                    STEP 2: After calling the tool, analyze the codebase_context that was provided and generate a proposal with ACTUAL UI/VISUAL CODE CHANGES based on the actual code you see.
+                    
+                    CRITICAL FOCUS: UI/VISUAL ADJUSTMENTS ONLY - analyze the CSS, Tailwind classes, inline styles, and component styling in the codebase_context provided above.
+                    
+                    STEP 3: Return ONLY valid JSON (no explanations, no code fences, no text before/after):
+                    
+                    {{"proposal_id": "exp-unique", "idea_summary": "Specific UI/visual improvement based on actual styling code analysis (e.g., 'Improve button hover states', 'Fix spacing inconsistencies', 'Enhance visual hierarchy')", "rationale": "Detailed explanation of the UI/visual problem found in the styling code (what styling issue exists, why it hurts the user experience visually, how the change will improve visual design)", "expected_impact": {{"metric": "click_rate", "delta_pct": 0.05}}, "technical_plan": [{{"file": "actual/path/to/style/file.ext (CSS, JSX, TSX, etc.)", "action": "Specific UI/styling change description"}}], "update_block": "ACTUAL UI/STYLING CODE CHANGES in Fast Apply format with +/- markers showing specific styling modifications (CSS properties, Tailwind classes, inline styles, component props) - NO placeholders, NO instructions, JUST ACTUAL STYLING CODE", "category": "ui_optimization", "confidence": 0.8}}
+                    
+                    NOTE: The proposal_id field will be ignored - a unique ID will be generated automatically. Just use "exp-unique" as a placeholder.
+                    
+                    IMPORTANT: Return ONLY the JSON object, nothing else. No explanations, no code fences, no markdown. Just pure valid JSON that can be parsed directly.
+                    The update_block MUST contain actual UI/styling code changes with +/- markers (CSS changes, Tailwind class modifications, style prop updates), NOT instructions or placeholders.
+                    Focus ONLY on visual/styling improvements that users will see.
                     """,
                     model="gpt-4o",
                     server_deployments=deployments,
-                    max_steps=5
+                    max_steps=10
                 )
             else:
                 raise Exception("MCP tool not available")
@@ -440,29 +470,18 @@ User-provided codebase context:
             result = await metorial.run(
                 client=openai_client,
                 message=f"""
-                YOU ARE A UI/VISUAL DESIGN-FOCUSED CODE ANALYST. Your PRIMARY focus is identifying VISUAL DESIGN AND USER INTERFACE PROBLEMS in the actual code and proposing MEASURABLE UI/VISUAL IMPROVEMENTS. Prioritize UI improvements over UX improvements (focus on what users SEE, not just what they experience).
+                YOU ARE A UI/VISUAL DESIGN-FOCUSED CODE ANALYST. Your PRIMARY focus is identifying VISUAL DESIGN AND USER INTERFACE PROBLEMS in the actual code and proposing MEASURABLE UI/VISUAL IMPROVEMENTS. FOCUS EXCLUSIVELY ON UI/VISUAL ADJUSTMENTS (what users SEE).
                 
                 REPOSITORY CONTEXT (ACTUAL CODE FROM {repo_fullname}):
                 {repo_context}
                 
                 CRITICAL INSTRUCTIONS:
                 1. IGNORE configuration files (package.json, pubspec.yaml, tsconfig.json, etc.) - these are NOT user-written code
-                2. FOCUS ONLY on user-written source code files (Dart, JavaScript, TypeScript, Python, etc.)
-                3. ANALYZE ACTUAL USER EXPERIENCE FLOWS and identify REAL UX/UI PROBLEMS:
+                2. FOCUS ONLY on UI/STYLING code files (CSS, Tailwind classes, component styling, HTML structure, React/Flutter UI components)
+                3. IGNORE: Functional logic, backend code, business logic, data processing, API calls, error handling logic (unless it affects UI display)
+                4. ANALYZE ACTUAL STYLING/UI CODE and identify VISUAL/UI PROBLEMS:
                    
-                   UX PROBLEMS (User Experience):
-                   - Missing error handling that causes poor UX (crashes, unhelpful errors)
-                   - Missing loading states (users see nothing while waiting)
-                   - Poor user feedback (no success/error messages)
-                   - Confusing navigation flows
-                   - Slow/unresponsive UI (performance issues affecting UX)
-                   - Accessibility issues (missing labels, poor contrast)
-                   - Form validation issues
-                   - Missing empty states
-                   - Poor error messages
-                   - Unclear user flows
-                   
-                   UI PROBLEMS (User Interface / Visual Design) - PRIORITIZE THESE:
+                   UI PROBLEMS (User Interface / Visual Design) - FOCUS EXCLUSIVELY ON THESE:
                    - Poor visual hierarchy (important elements not emphasized, need better sizing/spacing)
                    - Inconsistent spacing/padding (messy layouts, elements too close/far)
                    - Poor typography (hard to read, wrong sizes, bad font choices)
@@ -483,30 +502,32 @@ User-provided codebase context:
                 
                 YOUR ANALYSIS PROCESS:
                 
-                Step 1: UNDERSTAND THE USER FLOW
-                - Map out actual user flows from the code (e.g., "User opens app → sees loading → authenticates → sees home")
-                - Identify each step in the flow and what could go wrong
-                - Look for places where users might get confused, stuck, or see errors
+                Step 1: UNDERSTAND THE VISUAL UI STRUCTURE
+                - Analyze the UI/styling code structure (CSS, component styling, layout code)
+                - Identify visual elements and their current styling (buttons, forms, cards, containers, text, spacing)
+                - Look for visual inconsistencies and styling patterns across the codebase
+                - Understand the current visual design system (if any) and identify gaps
                 
-                Step 2: IDENTIFY SPECIFIC UX/UI PROBLEMS IN THE CODE
-                - Find actual code that handles user interactions (buttons, forms, navigation, API calls)
-                - Look for missing error handling: try/catch blocks, error states, error messages
-                - Find missing loading states: async operations without loading indicators
-                - Identify poor user feedback: no success messages, unclear error messages
-                - Spot performance issues: blocking operations, missing debouncing, inefficient renders
-                - Check for accessibility: missing labels, poor keyboard navigation
-                - Analyze UI code: component styling, layouts, visual hierarchy, colors, spacing
-                - Find inconsistent styling: same elements styled differently across the app
-                - Identify poor visual design: cluttered layouts, poor spacing, bad typography
-                - Look for missing visual polish: no hover states, no transitions, no visual feedback
-                - Check responsive design: layouts that don't work on mobile/tablet
+                Step 2: IDENTIFY SPECIFIC UI/VISUAL PROBLEMS IN THE CODE
+                - Analyze UI/STYLING code: CSS files, Tailwind classes, inline styles, component styling props
+                - Find styling inconsistencies: same elements styled differently across the app
+                - Identify poor visual design: cluttered layouts, poor spacing, bad typography, inconsistent colors
+                - Look for missing visual polish: no hover states, no transitions, no shadows, no borders
+                - Check for visual hierarchy issues: important elements not emphasized, poor sizing/spacing
+                - Find typography problems: hard to read, wrong sizes, bad font choices, poor contrast
+                - Identify color scheme issues: colors don't work together, poor contrast, inconsistent palette
+                - Look for button/form styling problems: no hover states, bad colors, wrong sizes, unclear styling
+                - Check responsive design: layouts that don't work on mobile/tablet, missing breakpoints
+                - Find layout issues: elements overlapping, misaligned, need better grid/flexbox
+                - Identify missing visual feedback: no loading indicators, no hover effects, no active states
+                - Check card/container styling: no shadows, no borders, no visual separation
                 
-                Step 3: PROPOSE MEASURABLE UI/VISUAL IMPROVEMENTS (PRIORITIZE UI OVER UX)
-                - Choose ONE specific, high-impact UI/VISUAL improvement based on actual code you analyzed
-                - PRIORITIZE VISUAL/UI improvements over functional UX improvements
+                Step 3: PROPOSE MEASURABLE UI/VISUAL IMPROVEMENTS (UI/VISUAL ADJUSTMENTS ONLY)
+                - Choose ONE specific, high-impact UI/VISUAL improvement based on actual styling/UI code you analyzed
+                - FOCUS EXCLUSIVELY ON VISUAL/UI improvements (styling changes, layout adjustments, visual design)
                 - Make sure your change is CORRECT and will actually work (use proper syntax, match existing patterns)
                 - Focus on improvements that users will VISUALLY NOTICE immediately
-                - PRIORITY: UI/VISUAL improvements (what users see):
+                - REQUIRED: UI/VISUAL improvements (what users see) - styling, layout, colors, typography, visual hierarchy:
                   * Improve visual hierarchy with better sizing, spacing, or colors
                   * Add consistent spacing/padding for cleaner layouts
                   * Improve typography (font sizes, weights, colors for better readability)
@@ -526,17 +547,18 @@ User-provided codebase context:
                   * Add empty states
                   * Improve form validation feedback
                 
-                Step 4: WRITE CORRECT, WORKING CODE
-                - Your code changes MUST be syntactically correct and match the existing code style
-                - Use actual function names, class names, variable names from the code you analyzed
-                - Include proper error handling, state management, and user feedback
-                - For Flutter/Dart: Pay EXTREME attention to code structure:
-                  * Widget properties go INSIDE widget constructors (e.g., ElevatedButton(style: styleFrom(...)))
-                  * Button style properties go in ElevatedButton.styleFrom() (e.g., overlayColor, onPrimary)
-                  * State variables go in setState(() {{ variable = value; }})
-                  * NEVER put widget properties (like onPrimary, overlayColor) inside setState() blocks
-                  * Preserve the exact structure of the original code - only modify what needs to change
-                - Test your logic mentally - will this actually work and improve UX?
+                Step 4: WRITE CORRECT, WORKING UI/STYLING CODE
+                - Your UI/styling changes MUST be syntactically correct and match the existing code style
+                - Use actual CSS classes, Tailwind classes, style props, component names from the code you analyzed
+                - For CSS: Match existing patterns, use correct selectors, proper property syntax
+                - For Tailwind: Use correct class names, match existing Tailwind patterns
+                - For React/component styling: Use correct style props, className props, or styled-component patterns
+                - For Flutter/Dart: Pay EXTREME attention to UI/styling code structure:
+                  * Widget style properties go INSIDE widget constructors (e.g., ElevatedButton(style: styleFrom(...)))
+                  * Button style properties go in ElevatedButton.styleFrom() (e.g., backgroundColor, foregroundColor, overlayColor)
+                  * Style properties NEVER go in setState() blocks - only state variables
+                  * Preserve the exact structure of the original UI code - only modify styling properties
+                - Test your styling mentally - will this actually work and improve the visual appearance?
                 
                 EXAMPLE OF CORRECT Flutter update_block:
                 If you want to add overlayColor to a button, it goes in the styleFrom() call:
@@ -559,7 +581,7 @@ User-provided codebase context:
                 
                 Return a JSON object with this structure:
                 {{
-                    "proposal_id": "exp-001",
+                    "proposal_id": "exp-unique",
                     "idea_summary": "Specific UX/UI improvement based on actual code - e.g., 'Add loading state to prevent blank screen during auth' or 'Improve visual hierarchy with better spacing' or 'Add hover states for better interactivity'",
                     "rationale": "DETAILED explanation of the UX/UI problem you found in the code: What user flow or visual design was affected? What specific code has the issue? Why does it hurt UX/UI? How will your change improve the user experience or visual design? Reference specific files, functions, components, and code patterns you saw.",
                     "expected_impact": {{"metric": "user_satisfaction", "delta_pct": 0.10}},
@@ -625,6 +647,18 @@ User-provided codebase context:
         # Try to extract JSON object from the text
         def extract_json_object(text):
             """Extract the first complete JSON object from text by matching braces."""
+            # First, try to extract JSON from code fences (```json ... ```)
+            code_fence_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+            code_fence_match = re.search(code_fence_pattern, text, re.DOTALL)
+            if code_fence_match:
+                potential_json = code_fence_match.group(1)
+                try:
+                    json.loads(potential_json)  # Validate it's valid JSON
+                    return potential_json
+                except:
+                    pass  # Continue to other extraction methods
+            
+            # Look for JSON object starting with {
             start_idx = text.find('{')
             if start_idx == -1:
                 return None
@@ -654,32 +688,169 @@ User-provided codebase context:
                     elif char == '}':
                         brace_count -= 1
                         if brace_count == 0:
-                            return text[start_idx:i+1]
+                            extracted = text[start_idx:i+1]
+                            # Validate it's reasonable JSON (has proposal_id or idea_summary)
+                            if 'proposal_id' in extracted or 'idea_summary' in extracted:
+                                return extracted
             
             return None
         
         json_str = extract_json_object(json_text)
         
         if not json_str:
-            json_match = re.search(r'\{.*\}', json_text, re.DOTALL)
+            # Try regex pattern matching for JSON
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', json_text, re.DOTALL)
             if json_match:
                 json_str = json_match.group()
             else:
-                json_str = json_text
+                # Last resort: try to find any { ... } block
+                json_match = re.search(r'\{.*\}', json_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group()
+                else:
+                    json_str = json_text
         
+        # Clean up common issues
+        # Remove trailing commas before closing braces/brackets
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
         # Fix invalid escape sequences
         json_str = json_str.replace('\\$', '\\\\$')
+        # Remove any leading/trailing whitespace
+        json_str = json_str.strip()
         
         try:
             proposal_json = json.loads(json_str)
         except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to parse proposal JSON: {str(e)}. Raw result: {proposal_text[:1000]}"
-            )
+            # Try to fix common JSON issues and retry
+            try:
+                # First, try to fix unterminated strings by properly escaping control characters
+                # Replace unescaped newlines, carriage returns, tabs in string values
+                # We'll use a more careful approach - find string values and escape them
+                
+                # Strategy: Find all string values and ensure they're properly escaped
+                # Pattern: "field": "value" where value might contain unescaped characters
+                
+                # Fix common issues:
+                # 1. Unescaped newlines in string values (should be \n)
+                # 2. Unescaped quotes in string values (should be \")
+                # 3. Unescaped backslashes (should be \\)
+                
+                # Use a simple approach: try to fix the update_block field specifically
+                # since that's most likely to have code with unescaped characters
+                if '"update_block"' in json_str:
+                    # Try to extract and re-escape the update_block value
+                    # Pattern: "update_block": "value"
+                    update_block_pattern = r'"update_block"\s*:\s*"([^"]*(?:"[^"]*")*[^"]*)"'
+                    
+                    # Try with more flexible pattern to handle multi-line strings
+                    update_block_pattern2 = r'"update_block"\s*:\s*"(.*?)"(?=\s*[,}])'
+                    match = re.search(update_block_pattern2, json_str, re.DOTALL)
+                    if not match:
+                        # Try pattern that matches until next field or end
+                        update_block_pattern3 = r'"update_block"\s*:\s*"([^"]*(?:"[^"]*")*[^"]*?)(?:"\s*[,}])'
+                        match = re.search(update_block_pattern3, json_str, re.DOTALL)
+                    
+                    if match:
+                        update_block_value = match.group(1)
+                        # Properly escape the update_block value for JSON
+                        # Need to escape in the right order: backslashes first, then quotes
+                        escaped_value = (
+                            update_block_value
+                            .replace('\\', '\\\\')  # Escape backslashes first
+                            .replace('"', '\\"')     # Escape quotes
+                            .replace('\n', '\\n')    # Escape newlines
+                            .replace('\r', '\\r')    # Escape carriage returns
+                            .replace('\t', '\\t')    # Escape tabs
+                        )
+                        # Replace in original JSON
+                        json_str = json_str[:match.start(1)] + escaped_value + json_str[match.end(1):]
+                    else:
+                        # If we couldn't match with regex, try a different approach
+                        # Find the update_block field and manually escape everything until the next quote
+                        # This handles cases where the string value has unescaped newlines
+                        update_block_start = json_str.find('"update_block"')
+                        if update_block_start != -1:
+                            # Find the opening quote after the colon
+                            colon_pos = json_str.find(':', update_block_start)
+                            if colon_pos != -1:
+                                quote_start = json_str.find('"', colon_pos)
+                                if quote_start != -1:
+                                    # Now find where the string should end
+                                    # Look for the next unescaped quote
+                                    quote_end = quote_start + 1
+                                    escaped = False
+                                    while quote_end < len(json_str):
+                                        if json_str[quote_end] == '\\' and not escaped:
+                                            escaped = True
+                                            quote_end += 1
+                                            continue
+                                        if json_str[quote_end] == '"' and not escaped:
+                                            # Found the end of the string
+                                            break
+                                        if escaped:
+                                            escaped = False
+                                        # If we hit a newline that's not escaped, we have a problem
+                                        # Try to find the next quote after this
+                                        quote_end += 1
+                                    
+                                    # Extract and escape the value
+                                    update_block_value = json_str[quote_start+1:quote_end]
+                                    escaped_value = (
+                                        update_block_value
+                                        .replace('\\', '\\\\')  # Escape backslashes first
+                                        .replace('"', '\\"')     # Escape quotes
+                                        .replace('\n', '\\n')    # Escape newlines
+                                        .replace('\r', '\\r')    # Escape carriage returns
+                                        .replace('\t', '\\t')    # Escape tabs
+                                    )
+                                    # Replace in original JSON
+                                    json_str = json_str[:quote_start+1] + escaped_value + json_str[quote_end:]
+                
+                # Also try to fix other common issues
+                # Remove control characters that might break JSON (but keep \n, \r, \t if they're escaped)
+                json_str_clean = json_str
+                
+                try:
+                    proposal_json = json.loads(json_str_clean)
+                except json.JSONDecodeError as e2:
+                    # Last resort: try with minimal fixes
+                    # Just remove truly problematic control characters (not \n \r \t if escaped)
+                    json_str_minimal = ''.join(
+                        char if ord(char) >= 32 or char in '\n\r\t' or (char == '\\' and i+1 < len(json_str_clean) and json_str_clean[i+1] in 'nrt"\\')
+                        else ''
+                        for i, char in enumerate(json_str_clean)
+                    )
+                    try:
+                        proposal_json = json.loads(json_str_minimal)
+                    except json.JSONDecodeError:
+                        # Log the error with more context
+                        error_detail = f"Failed to parse proposal JSON: {str(e)}. Attempted fixes also failed: {str(e2)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
+                        raise HTTPException(
+                            status_code=500,
+                            detail=error_detail
+                        )
+            except HTTPException:
+                raise
+            except Exception as fix_error:
+                # If fixes fail, raise original error
+                error_detail = f"Failed to parse proposal JSON: {str(e)}. Fix attempt failed: {str(fix_error)}. Raw result (first 2000 chars): {proposal_text[:2000]}"
+                raise HTTPException(
+                    status_code=500,
+                    detail=error_detail
+                )
 
-        # Get original proposal_id from AI response
-        original_proposal_id = proposal_json.get("proposal_id", "exp-001")
+        # Generate a unique proposal_id based on timestamp and repository
+        import time
+        import hashlib
+        timestamp = int(time.time())
+        
+        # Create a unique proposal ID based on timestamp and repo
+        # Format: exp-{timestamp}-{hash}
+        repo_hash = hashlib.md5(repo_fullname.encode()).hexdigest()[:6] if repo_fullname else "default"
+        unique_proposal_id = f"exp-{timestamp}-{repo_hash}"
+        
+        # Keep AI's proposal_id as a reference, but use our unique one
+        ai_proposal_id = proposal_json.get("proposal_id", "exp-001")
         update_block = proposal_json.get("update_block", "")
         
         # Clean up update_block: Remove git diff headers if present
@@ -698,9 +869,9 @@ User-provided codebase context:
                 cleaned_lines.append(line)
             update_block = '\n'.join(cleaned_lines).strip()
         
-        # Save proposal to Supabase
+        # Save proposal to Supabase with unique proposal_id
         proposal = db_operations.create_proposal(
-            proposal_id=original_proposal_id,
+            proposal_id=unique_proposal_id,
             idea_summary=proposal_json.get("idea_summary", ""),
             rationale=proposal_json.get("rationale", ""),
             expected_impact=proposal_json.get("expected_impact", {}),
@@ -713,7 +884,7 @@ User-provided codebase context:
         )
 
         # Use the actual proposal_id that was saved (may have been modified if duplicate)
-        actual_proposal_id = proposal.get("proposal_id", original_proposal_id)
+        actual_proposal_id = proposal.get("proposal_id", unique_proposal_id)
 
         # Send Slack notification if OAuth session ID is available
         import logging
@@ -731,7 +902,9 @@ User-provided codebase context:
                 slack_message += f"Category: {proposal_json.get('category', 'general')}\n"
                 slack_message += f"Confidence: {proposal_json.get('confidence', 0.5) * 100:.0f}%"
                 
-                await send_slack_message(slack_message, req.oauth_session_id)
+                # Call send_slack_message with proper request object
+                slack_req = SlackMessageRequest(message=slack_message, oauth_session_id=req.oauth_session_id)
+                await send_slack_message(slack_req)
                 logger.info(f"Successfully sent Slack notification for new proposal {actual_proposal_id}")
             except Exception as slack_error:
                 # Don't fail the proposal creation if Slack notification fails
@@ -820,36 +993,34 @@ async def execute_experiment(req: ExecuteExperimentRequest):
         logger.info(f"Executing experiment {req.proposal_id}")
         logger.info(f"Repository: {req.repo_fullname}, File: {req.file_path}, Branch: {base_branch}")
         logger.info(f"Deployments: {deployments}")
+        logger.info(f"NORTHSTAR_MCP_DEPLOYMENT_ID: {northstar_mcp_deployment_id}")
+        logger.info(f"Total deployments count: {len(deployments)}")
         
         try:
+            # Escape update_block for JSON embedding in message
+            import json as json_module
+            escaped_update_block = json_module.dumps(req.update_block)  # This escapes quotes and special chars
+            
+            # Use explicit function/tool calling approach
+            # Metorial should automatically discover tools from the deployment
             result = await metorial.run(
                 client=openai_client,
-                message=f"""
-                Execute this experiment:
+                message=f"""You have access to tools from the MCP server deployment {northstar_mcp_deployment_id}.
 
-                Experiment ID: {req.proposal_id}
-                Instruction: {req.instruction}
-                Repository: {req.repo_fullname}
-                File to modify: {req.file_path}
-                Base branch: {base_branch}
+Call the execute_code_change tool with these parameters:
+{{
+  "instruction": {json_module.dumps(req.instruction)},
+  "update_block": {escaped_update_block},
+  "repo": {json_module.dumps(req.repo_fullname)},
+  "file_path": {json_module.dumps(req.file_path)},
+  "base_branch": {json_module.dumps(base_branch)}
+}}
 
-                CRITICAL: You MUST use the execute_code_change tool with these EXACT parameters:
-                - instruction: "{req.instruction}"
-                - update_block: {req.update_block}
-                - repo: "{req.repo_fullname}"
-                - file_path: "{req.file_path}"
-                - base_branch: "{base_branch}"
-
-                Steps:
-                1. Call execute_code_change with the exact parameters above
-                2. Once the PR is created, post a message to Slack announcing:
-                   "Experiment {req.proposal_id} - PR created: [url]"
-                3. Return the PR URL in your response as JSON with format:
-                   {{"pr_url": "https://github.com/...", "branch": "northstar/..."}}
-                """,
+The tool will return JSON with a pr_url field. Extract and return only that JSON.""",
                 model="gpt-4o",
                 server_deployments=deployments,
-                max_steps=10
+                max_steps=20,
+                temperature=0.1  # Lower temperature for more deterministic tool calling
             )
             
             logger.info(f"Metorial run completed. Result: {result.text[:500]}...")
@@ -897,76 +1068,91 @@ async def execute_experiment(req: ExecuteExperimentRequest):
         
         # Check if tool was called successfully by looking for success indicators
         if not pr_url:
-            # Check if the tool wasn't available
-            if "not available" in result.text.lower() or "tool" in result.text.lower() and "not found" in result.text.lower():
-                logger.error(f"execute_code_change tool may not be available. Result: {result.text[:1000]}")
+            error_detail = None
+            # Check if Metorial refused to call the tool
+            result_lower = result.text.lower()
+            refused_indicators = ["can't perform", "cannot perform", "i'm sorry", "i cannot", "unable to", "not available", "not found", "not part"]
+            
+            if any(indicator in result_lower for indicator in refused_indicators) or ("tool" in result_lower and ("not found" in result_lower or "not part" in result_lower)):
+                error_detail = f"""Metorial is refusing to call execute_code_change tool. Common causes:
+1. Deployment ID {northstar_mcp_deployment_id} is incorrect or deployment doesn't exist
+2. MCP server is not deployed or not active in Metorial
+3. Tool execute_code_change is not properly registered in the MCP server
+4. Metorial cannot discover tools from the deployment
+
+TROUBLESHOOTING:
+- Verify NORTHSTAR_MCP_DEPLOYMENT_ID={northstar_mcp_deployment_id} matches your Metorial deployment
+- Check that your MCP server (northstar_mcp_typescript) is deployed in Metorial
+- Verify the deployment is active and running
+- Confirm execute_code_change tool is registered in server.ts
+- Try redeploying the MCP server
+
+Metorial response: {result.text[:500]}"""
+                logger.error(error_detail)
+                logger.error(f"Full Metorial result: {result.text[:2000]}")
+                logger.error(f"Deployment ID: {northstar_mcp_deployment_id}")
+                logger.error(f"Deployments config: {deployments}")
                 db_operations.update_experiment(
                     experiment_id=experiment.get("id"),
                     status="failed"
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"execute_code_change tool is not available. This might mean NORTHSTAR_MCP_DEPLOYMENT_ID is incorrect or the tool isn't deployed. Result: {result.text[:500]}"
-                )
             # Check if there's an error message in the result
             elif "error" in result.text.lower() or "failed" in result.text.lower():
-                logger.error(f"No PR URL found, and result contains error indicators: {result.text[:1000]}")
+                error_detail = f"PR creation failed. The execute_code_change tool returned an error."
+                logger.error(f"{error_detail} Result: {result.text[:1000]}")
                 # Update experiment status to failed
                 db_operations.update_experiment(
                     experiment_id=experiment.get("id"),
                     status="failed"
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"PR creation failed. Metorial result: {result.text[:500]}"
-                )
             else:
-                logger.warning(f"No PR URL found in result. Full result: {result.text[:1000]}")
-                # Still raise an error - PR should have been created
+                error_detail = f"PR URL not found in result. The execute_code_change tool may not have been called or may have returned a response in an unexpected format."
+                logger.error(f"{error_detail} Full result: {result.text[:2000]}")
+                # Still update experiment status to failed
                 db_operations.update_experiment(
                     experiment_id=experiment.get("id"),
                     status="failed"
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"PR URL not found in Metorial result. The execute_code_change tool may not have been called or may have failed silently. Result: {result.text[:500]}"
-                )
-
-        # Update experiment with PR URL
-        if pr_url:
-            db_operations.update_experiment(
-                experiment_id=experiment.get("id"),
-                pr_url=pr_url,
-                status="running"
+            
+            # Always raise an error if no PR URL - don't return partial success
+            raise HTTPException(
+                status_code=500,
+                detail=f"{error_detail or 'PR creation failed'}. Check logs for details. Metorial result (first 1000 chars): {result.text[:1000]}"
             )
-            logger.info(f"Updated experiment {experiment.get('id')} with PR URL: {pr_url}")
-        else:
-            logger.warning(f"No PR URL to save for experiment {experiment.get('id')}")
+
+        # Update experiment with PR URL (we only reach here if pr_url exists due to check above)
+        db_operations.update_experiment(
+            experiment_id=experiment.get("id"),
+            pr_url=pr_url,
+            status="running"
+        )
+        logger.info(f"Updated experiment {experiment.get('id')} with PR URL: {pr_url}")
 
         # Send Slack notification if OAuth session ID is available
+        slack_notification_sent = False
         if not slack_deployment_id:
             logger.info("SLACK_DEPLOYMENT_ID not set, skipping Slack notification for experiment execution")
         elif not req.oauth_session_id:
             logger.info(f"No OAuth session ID in request for proposal {req.proposal_id}, skipping Slack notification")
         else:
             try:
-                if pr_url:
-                    slack_message = f"✅ Experiment executed successfully!\n"
-                    slack_message += f"ID: {req.proposal_id}\n"
-                    slack_message += f"Description: {req.instruction}\n"
-                    slack_message += f"PR: {pr_url}"
-                else:
-                    slack_message = f"⚠️ Experiment execution completed, but PR creation may have failed\n"
-                    slack_message += f"ID: {req.proposal_id}\n"
-                    slack_message += f"Description: {req.instruction}"
+                slack_message = f"✅ Experiment executed successfully!\n"
+                slack_message += f"ID: {req.proposal_id}\n"
+                slack_message += f"Description: {req.instruction}\n"
+                slack_message += f"PR: {pr_url}"
                 
-                await send_slack_message(slack_message, req.oauth_session_id)
+                # Call send_slack_message with proper request object
+                slack_req = SlackMessageRequest(message=slack_message, oauth_session_id=req.oauth_session_id)
+                await send_slack_message(slack_req)
+                slack_notification_sent = True
                 logger.info(f"Successfully sent Slack notification for experiment {req.proposal_id}")
             except Exception as slack_error:
-                # Don't fail the execution if Slack notification fails
+                # Don't fail the execution if Slack notification fails, but log the error
                 logger.warning(f"Failed to send Slack notification for experiment execution: {str(slack_error)}")
                 logger.warning(f"OAuth session ID: {req.oauth_session_id[:20]}..." if req.oauth_session_id else "No OAuth session ID")
                 logger.warning(f"Slack deployment ID: {slack_deployment_id}" if slack_deployment_id else "No Slack deployment ID")
+                import traceback
+                logger.warning(f"Slack error traceback: {traceback.format_exc()}")
 
         # Create activity log
         db_operations.create_activity_log(
@@ -977,13 +1163,13 @@ async def execute_experiment(req: ExecuteExperimentRequest):
         )
 
         return {
-            "status": "success" if pr_url else "partial",
-            "result": result.text[:1000],  # Limit result size in response
+            "status": "success",
             "proposal_id": req.proposal_id,
             "experiment_id": experiment.get("id"),
             "pr_url": pr_url,
             "branch": branch,
-            "warning": "PR URL not found in result" if not pr_url else None
+            "slack_notification_sent": slack_notification_sent,
+            "message": f"Experiment executed successfully. PR created: {pr_url}" + (f" Slack notification sent." if slack_notification_sent else f" Note: Slack notification {'skipped (no deployment ID)' if not slack_deployment_id else 'skipped (no OAuth session)' if not req.oauth_session_id else 'failed - check logs'}.")
         }
 
     except HTTPException:
@@ -1107,6 +1293,49 @@ async def list_repositories():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/mcp-deployment")
+async def debug_mcp_deployment():
+    """
+    Debug endpoint to test MCP deployment and list available tools.
+    """
+    try:
+        if not northstar_mcp_deployment_id:
+            return {
+                "status": "error",
+                "message": "NORTHSTAR_MCP_DEPLOYMENT_ID is not set",
+                "deployment_id": None
+            }
+        
+        # Try to list tools from the deployment
+        deployments = [{"serverDeploymentId": northstar_mcp_deployment_id}]
+        
+        logger.info(f"Testing MCP deployment: {northstar_mcp_deployment_id}")
+        
+        result = await metorial.run(
+            client=openai_client,
+            message="List all available tools from the deployment. What tools can you access?",
+            model="gpt-4o",
+            server_deployments=deployments,
+            max_steps=5
+        )
+        
+        return {
+            "status": "success",
+            "deployment_id": northstar_mcp_deployment_id,
+            "metorial_response": result.text[:1000],
+            "full_response": result.text
+        }
+    except Exception as e:
+        logger.error(f"Error testing MCP deployment: {str(e)}")
+        import traceback
+        return {
+            "status": "error",
+            "deployment_id": northstar_mcp_deployment_id,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @app.get("/repositories/active")
@@ -1346,7 +1575,9 @@ async def approve_proposal(
                 slack_message += f"Proposal ID: {proposal_id}\n"
                 slack_message += f"Description: {proposal.get('idea_summary', 'Unknown')}"
                 
-                await send_slack_message(slack_message, oauth_session_id)
+                # Call send_slack_message with proper request object
+                slack_req = SlackMessageRequest(message=slack_message, oauth_session_id=oauth_session_id)
+                await send_slack_message(slack_req)
                 logger.info(f"Successfully sent Slack notification for approval of proposal {proposal_id}")
             except Exception as slack_error:
                 logger.warning(f"Failed to send Slack notification for approval: {str(slack_error)}")
@@ -1354,25 +1585,50 @@ async def approve_proposal(
                 logger.warning(f"Slack deployment ID: {slack_deployment_id}" if slack_deployment_id else "No Slack deployment ID")
 
         # Execute the experiment
-        execution_result = await execute_experiment(execute_req)
+        try:
+            execution_result = await execute_experiment(execute_req)
+            
+            # Create activity log with PR URL if available
+            pr_url = execution_result.get("pr_url")
+            log_message = f"Approved and executed proposal {proposal_id}"
+            if pr_url:
+                log_message += f" - PR: {pr_url}"
+            else:
+                log_message += " (PR creation failed - check logs)"
+            
+            db_operations.create_activity_log(
+                message=log_message,
+                proposal_id=proposal_id,
+                log_type="success" if pr_url else "warning"
+            )
 
-        # Create activity log
-        db_operations.create_activity_log(
-            message=f"Approved and executed proposal {proposal_id}",
-            proposal_id=proposal_id,
-            log_type="success"
-        )
-
-        return {
-            "status": "success",
-            "proposal": proposal,
-            "execution": execution_result
-        }
+            return {
+                "status": "success",
+                "proposal": proposal,
+                "execution": execution_result,
+                "message": execution_result.get("message", "Experiment executed")
+            }
+        except HTTPException as exec_error:
+            # Log the execution error
+            logger.error(f"Execution failed for proposal {proposal_id}: {exec_error.detail}")
+            db_operations.create_activity_log(
+                message=f"Failed to execute proposal {proposal_id}: {exec_error.detail[:200]}",
+                proposal_id=proposal_id,
+                log_type="error"
+            )
+            # Re-raise to return proper error to user
+            raise HTTPException(
+                status_code=exec_error.status_code,
+                detail=f"Failed to execute experiment: {exec_error.detail}. Check backend logs for full details."
+            )
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error in approve_proposal: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}. Check backend logs for details.")
 
 
 @app.post("/proposals/{proposal_id}/reject")
@@ -1396,6 +1652,10 @@ async def reject_proposal(proposal_id: str):
             "status": "success",
             "proposal": proposal
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Knowledge base endpoints
