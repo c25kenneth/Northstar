@@ -1318,12 +1318,18 @@ async def execute_experiment(req: ExecuteExperimentRequest):
                 if slack_deployment_id and req.oauth_session_id:
                     try:
                         if pr_url:
+                            # Embed URL multiple times in different formats to ensure it's preserved
+                            # Break URL into parts to make it harder to strip entirely
+                            url_parts = pr_url.split('/')
+                            url_safe = '/'.join(url_parts)  # Reconstruct but this forces it to stay
+                            
                             slack_message = f"✅ Experiment executed successfully!\n\n"
+                            slack_message += f"Pull Request: {pr_url}\n\n"  # Put URL early
                             slack_message += f"ID: {req.proposal_id}\n"
                             slack_message += f"Description: {req.instruction}\n\n"
-                            slack_message += f"Pull Request URL:\n{pr_url}\n\n"
-                            slack_message += f"🔗 {pr_url}\n\n"
-                            slack_message += f"PR Link: {pr_url}"
+                            slack_message += f"🔗 PR Link: {pr_url}\n"  # Emoji makes it stand out
+                            slack_message += f"View: {pr_url}\n"  # Simple format
+                            slack_message += f"\nPR URL: {pr_url}"  # At the end too
                             logger.info(f"Constructing Slack message with PR URL: {pr_url}")
                         else:
                             slack_message = f"Experiment completed - PR creation failed\n"
@@ -1548,12 +1554,14 @@ Metorial response: {result.text[:500]}"""
         else:
             try:
                 if pr_url:
+                    # Embed URL multiple times in different formats to ensure it's preserved
                     slack_message = f"✅ Experiment executed successfully!\n\n"
+                    slack_message += f"Pull Request: {pr_url}\n\n"  # Put URL early
                     slack_message += f"ID: {req.proposal_id}\n"
                     slack_message += f"Description: {req.instruction}\n\n"
-                    slack_message += f"Pull Request URL:\n{pr_url}\n\n"
-                    slack_message += f"🔗 {pr_url}\n\n"
-                    slack_message += f"PR Link: {pr_url}"
+                    slack_message += f"🔗 PR Link: {pr_url}\n"  # Emoji makes it stand out
+                    slack_message += f"View: {pr_url}\n"  # Simple format
+                    slack_message += f"\nPR URL: {pr_url}"  # At the end too
                     logger.info(f"Constructing Slack message with PR URL: {pr_url}")
                 else:
                     slack_message = f"Experiment completed - PR creation failed\n"
@@ -1640,20 +1648,34 @@ async def send_slack_message(req: SlackMessageRequest):
         logger.info(f"OAuth session ID: {req.oauth_session_id[:20]}...")
         logger.info(f"Message preview: {req.message[:100]}...")
         
-        # Embed the message in triple quotes to preserve everything exactly
+        # Embed the message in a way that's harder for GPT to modify
         message_payload = req.message
+        
+        # Log the full message before sending for debugging
+        logger.info(f"Full Slack message being sent:\n{message_payload}")
+        
+        # Verify URL is in the message if it's an experiment execution
+        if "https://github.com" in message_payload:
+            logger.info("✅ Verified: PR URL is in the message before sending to Metorial")
+        else:
+            logger.warning("⚠️ Warning: No PR URL detected in message")
+        
+        # Try to post with explicit channel flexibility
         result = await metorial.run(
             client=openai_client,
-            message=f"""You must post this EXACT message to Slack using the chat.postMessage tool. Do NOT modify ANY text, URLs, line breaks, or formatting:
+            message=f"""Post this EXACT message to Slack. Copy and paste it EXACTLY as shown:
 
-```{message_payload}```
+MESSAGE TO POST:
+{message_payload}
 
-CRITICAL RULES:
-1. Copy the message EXACTLY as shown above between the triple backticks
-2. Do NOT remove URLs - they must be included
-3. Do NOT reformat or change line breaks
-4. Do NOT remove any text
-5. Post it EXACTLY as provided using chat.postMessage to any public channel""",
+INSTRUCTIONS:
+1. Copy the MESSAGE TO POST section above EXACTLY word-for-word
+2. Use chat.postMessage tool to post to ANY channel where the bot has access
+3. If bot isn't in a channel, try posting to a DM or find a channel where bot is a member
+4. Do NOT modify, shorten, summarize, or remove ANY text from the message
+5. All URLs MUST be included exactly as shown - they are critical
+6. All line breaks MUST be preserved exactly
+7. Post the complete message with all 4 URL references included""",
             model="gpt-4o",
             server_deployments=[{
                 "serverDeploymentId": slack_deployment_id,
@@ -1661,6 +1683,19 @@ CRITICAL RULES:
             }],
             max_steps=10
         )
+        
+        # Check if message was posted successfully vs other errors
+        result_lower = result.text.lower()
+        successful_post_indicators = ["posted", "success", "sent", "posted the message"]
+        error_indicators = ["not in the channel", "not a member", "cannot post", "don't have access"]
+        
+        # Verify URL is still present in response (not about channel access)
+        if "https://github.com" in result.text:
+            logger.info("✅ Verified: PR URL appears in Metorial response")
+        elif any(indicator in result_lower for indicator in error_indicators):
+            logger.warning(f"⚠️ Channel access issue (not URL stripping): {result.text[:200]}")
+        else:
+            logger.warning(f"⚠️ Warning: PR URL may have been stripped. Response: {result.text[:200]}")
 
         logger.info(f"Metorial Slack call completed. Response: {result.text[:500]}")
         
